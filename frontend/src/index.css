@@ -1,0 +1,71 @@
+/* Global reset and dark theme base */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  background: #0a0f1e;
+  color: #e2e8f0;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Range input base */
+input[type="range"] {
+  cursor: pointer;
+}
+
+/* Selection */
+::selection {
+  background: #1e3a8a;
+  color: #e2e8f0;
+}
+
+/* Focus outline */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* Table hover rows */
+tbody tr:hover {
+  background: #1e3a5f22 !important;
+}
+
+/* Smooth NavLink transitions handled inline */
+a {
+  text-decoration: none;
+}
+
+/* Prevent chart text from getting clipped */
+.recharts-wrapper {
+  overflow: visible !important;
+}
