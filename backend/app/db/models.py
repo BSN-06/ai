@@ -89,6 +89,8 @@ class TrainingJob(Base):
     log_path = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
     config = Column(JSON, nullable=True)
+    epoch_history = Column(JSON, nullable=True)  # [{epoch, train_box_loss, ..., map50}]
+    cancel_requested = Column(Boolean, default=False)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -113,6 +115,9 @@ class EvaluationJob(Base):
     per_class_metrics = Column(JSON, nullable=True)
     confusion_matrix = Column(JSON, nullable=True)
     avg_inference_ms = Column(Float, nullable=True)
+    checkpoint_path = Column(String, nullable=True)
+    model_status_at_eval = Column(String, nullable=True)  # PRETRAINED / TRAINED
+    warnings = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
     report_path = Column(String, nullable=True)
     started_at = Column(DateTime, nullable=True)
@@ -236,3 +241,24 @@ class ReplaySession(Base):
     data_provenance = Column(String, default="recorded")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Report(Base):
+    """Persisted evaluation / test report (one row per report, JSON body on disk and in DB)."""
+    __tablename__ = "reports"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    report_type = Column(String, nullable=False)  # satellite_detection, thermal_detection, radar_tracking,
+    #                                               training, dataset_validation, fusion_tests,
+    #                                               recorded_replay, synthetic_integration
+    test_mode = Column(String, nullable=False)  # real_evaluation, recorded_replay, synthetic, dataset, training
+    source = Column(String, nullable=True)
+    model_checkpoint = Column(String, nullable=True)
+    num_samples = Column(Integer, default=0)
+    metrics = Column(JSON, nullable=True)
+    warnings = Column(JSON, nullable=True)
+    limitations = Column(JSON, nullable=True)
+    completion_status = Column(String, default="COMPLETED")
+    body = Column(JSON, nullable=True)
+    file_path = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

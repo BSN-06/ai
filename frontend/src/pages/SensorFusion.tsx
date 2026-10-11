@@ -1,277 +1,203 @@
-import { useState, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
-  listObservations, runCorrelation, autoGenerateEvents,
-  listEvents, getCorrelationHistory, updateEventReview,
+  autoGenerateEvents, exportEvent, getCorrelationHistory, getEvent, listEvents, listObservations, runCorrelation, updateEventReview,
 } from '../utils/api'
-import { formatTs, priorityColour, corrColour, sensorIcon, fmtConf, trunc } from '../utils/format'
-import type { Observation, Event, CorrelationDecision } from '../types'
+import type { CorrelationDecision, CorrelationResult, Event, Observation } from '../types'
+import { corrColour, fmtConf, formatTs, sensorIcon, trunc } from '../utils/format'
+import { usePolling } from '../hooks/usePolling'
+import {
+  Badge, Banner, Btn, C, Card, Empty, Field, Grid, KV, Page, PRIORITY_COL, ProvBadge, Table, downloadJson, errMsg, inputStyle,
+} from '../components/ui'
 
 export default function SensorFusion() {
-  const [observations, setObservations] = useState<Observation[]>([])
+  const [obs, setObs] = useState<Observation[]>([])
+  const [obsTotal, setObsTotal] = useState(0)
+  const [sensor, setSensor] = useState('')
+  const [prov, setProv] = useState('')
+  const [selected, setSelected] = useState<string[]>([])
+  const [temporal, setTemporal] = useState(300)
+  const [spatial, setSpatial] = useState(500)
+  const [corr, setCorr] = useState<CorrelationResult | null>(null)
+  const [history, setHistory] = useState<CorrelationDecision[]>([])
   const [events, setEvents] = useState<Event[]>([])
-  const [correlations, setCorrelations] = useState<CorrelationDecision[]>([])
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [selectedEvent, setSelectedEvent] = useState<Event | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
-  const [reviewNotes, setReviewNotes] = useState('')
+  const [prioFilter, setPrioFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [detail, setDetail] = useState<Event | null>(null)
+  const [notes, setNotes] = useState('')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => { refresh() }, [])
-
-  const refresh = async () => {
-    const [o, e, c] = await Promise.all([
-      listObservations(undefined, 100),
-      listEvents(undefined, undefined, 50),
-      getCorrelationHistory(50),
-    ])
-    setObservations(o.observations)
-    setEvents(e.events)
-    setCorrelations(c.decisions ?? [])
-  }
-
-  const toggle = (id: string) => {
-    setSelected(prev => {
-      const n = new Set(prev)
-      n.has(id) ? n.delete(id) : n.add(id)
-      return n
-    })
-  }
-
-  const runCorr = async () => {
-    setLoading(true); setMessage(null)
+  const refresh = useCallback(async () => {
     try {
-      const ids = selected.size > 0 ? Array.from(selected) : []
-      await runCorrelation(ids)
-      setMessage('Correlation complete.')
-      await refresh()
-    } catch { setMessage('Correlation failed.') }
-    finally { setLoading(false) }
-  }
+      const [o, e, h] = await Promise.all([
+        listObservations(sensor, 100, 0, prov), listEvents(prioFilter || undefined, statusFilter || undefined, 100),
+        getCorrelationHistory(30)])
+      setObs(o.observations); setObsTotal(o.total); setEvents(e.events); setHistory(h.decisions)
+    } catch (err) { setError(errMsg(err)) }
+  }, [sensor, prov, prioFilter, statusFilter])
 
-  const generateEvents = async () => {
-    setLoading(true); setMessage(null)
+  useEffect(() => { refresh() }, [refresh])
+  usePolling(refresh, 5000)
+
+  const toggle = (id: string) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id])
+
+  const doCorrelate = async () => {
+    setError(null); setMsg(null)
     try {
-      const ids = selected.size > 0 ? Array.from(selected) : []
-      const r = await autoGenerateEvents(ids)
-      setMessage(`Event created — priority: ${r.review_priority}`)
-      await refresh()
-    } catch { setMessage('Event generation failed.') }
-    finally { setLoading(false) }
+      const r = await runCorrelation(selected, temporal, spatial)
+      if (r.status === 'insufficient_data') setMsg(r.message ?? 'Need at least two observations.')
+      setCorr(r); refresh()
+    } catch (e) { setError(errMsg(e)) }
   }
-
-  const submitReview = async (status: string) => {
-    if (!selectedEvent) return
-    await updateEventReview(selectedEvent.id, status, reviewNotes || undefined)
-    setMessage(`Event marked as ${status}`)
-    setSelectedEvent(null); setReviewNotes('')
-    await refresh()
+  const doEvents = async (singletons: boolean) => {
+    setError(null)
+    try {
+      const r = await autoGenerateEvents(selected, singletons)
+      setMsg(`${r.events_created} event(s) created from ${r.observations_considered ?? selected.length} observation(s). ` +
+        (r.decisions_summary ? Object.entries(r.decisions_summary).map(([k, v]) => `${k}: ${v}`).join(' · ') : ''))
+      refresh()
+    } catch (e) { setError(errMsg(e)) }
+  }
+  const openEvent = async (id: string) => {
+    try { const e = await getEvent(id); setDetail(e); setNotes(e.reviewer_notes ?? '') } catch (err) { setError(errMsg(err)) }
+  }
+  const review = async (status: string) => {
+    if (!detail) return
+    await updateEventReview(detail.id, status, notes || undefined)
+    openEvent(detail.id); refresh()
   }
 
   return (
-    <div style={s.page}>
-      <h1 style={s.title}>🔗 Sensor Fusion & Event Prioritization</h1>
-      <p style={s.sub}>
-        Rule-based, uncertainty-aware correlation pipeline — NOT a trained fusion model.
-        Select observations below, run correlation, then generate prioritized review events.
-      </p>
+    <Page title="Sensor Fusion & Event Prioritization"
+      subtitle="Module D — rule-based, uncertainty-aware correlation (not a trained fusion model). Priority is a recommendation for human review only.">
+      <Banner kind="info">
+        Correlation requires valid timestamps and geographic positions in a common CRS. Pixel boxes are never treated as
+        geographic coordinates and matching class labels alone never correlate observations; otherwise the decision is
+        <strong> INSUFFICIENT_METADATA</strong>.
+      </Banner>
+      {error && <Banner kind="error">{error}</Banner>}
+      {msg && <Banner kind="ok">{msg}</Banner>}
 
-      <div style={s.infoBox}>
-        <strong>Correlation rules:</strong> Both timestamp AND geographic coordinates are required.
-        Pixel bounding boxes are not treated as geographic coordinates. Missing metadata returns
-        INSUFFICIENT_METADATA — the system never guesses.
-        Priority is a <em>human review recommendation</em>, not a determination of hostile intent.
-      </div>
-
-      <div style={s.row}>
-        {/* Observations selector */}
-        <div style={{ ...s.card, flex: 2 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <h3 style={s.cardTitle}>Observations ({observations.length})</h3>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button style={s.btnSm} onClick={() => setSelected(new Set(observations.map(o => o.id)))}>Select All</button>
-              <button style={s.btnSm} onClick={() => setSelected(new Set())}>Clear</button>
-              <button style={{ ...s.btn, opacity: loading ? 0.5 : 1 }} disabled={loading} onClick={runCorr}>
-                {loading ? '⏳' : '🔗 Run Correlation'}
-              </button>
-              <button style={{ ...s.btn, background: '#7c3aed', opacity: loading ? 0.5 : 1 }} disabled={loading} onClick={generateEvents}>
-                ⚡ Generate Event
-              </button>
-            </div>
-          </div>
-          {message && <div style={s.msgBox}>{message}</div>}
-          {observations.length === 0
-            ? <p style={s.noData}>No observations. Run inference or synthetic scenarios first.</p>
-            : (
-              <div style={{ maxHeight: 320, overflowY: 'auto' }}>
-                <table style={s.table}>
-                  <thead><tr>
-                    <th style={s.th}></th>
-                    {['Sensor', 'Class', 'Conf', 'Lat', 'Lon', 'Timestamp', 'Provenance'].map(h => <th key={h} style={s.th}>{h}</th>)}
-                  </tr></thead>
-                  <tbody>
-                    {observations.map(o => (
-                      <tr key={o.id} style={{ background: selected.has(o.id) ? '#1e3a5f' : undefined, cursor: 'pointer' }}
-                        onClick={() => toggle(o.id)}>
-                        <td style={s.td}><input type="checkbox" checked={selected.has(o.id)} onChange={() => toggle(o.id)} /></td>
-                        <td style={s.td}>{sensorIcon(o.sensor_type)} {o.sensor_type}</td>
-                        <td style={s.td}>{o.object_class ?? '—'}</td>
-                        <td style={s.td}>{fmtConf(o.confidence)}</td>
-                        <td style={s.td}>{o.latitude?.toFixed(4) ?? <span style={{ color: '#ef4444' }}>missing</span>}</td>
-                        <td style={s.td}>{o.longitude?.toFixed(4) ?? <span style={{ color: '#ef4444' }}>missing</span>}</td>
-                        <td style={s.td}>{o.observation_timestamp ? formatTs(o.observation_timestamp) : <span style={{ color: '#ef4444' }}>missing</span>}</td>
-                        <td style={s.td}>
-                          <span style={{ color: o.data_provenance === 'synthetic' ? '#a78bfa' : '#60a5fa', fontSize: 11 }}>{o.data_provenance}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+      <Card title={`Observations (${obsTotal}) · ${selected.length} selected`} style={{ marginBottom: 14 }} right={
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select value={sensor} onChange={e => setSensor(e.target.value)} style={{ ...inputStyle, width: 120 }}>
+            <option value="">all sensors</option><option>satellite</option><option>thermal</option><option>radar</option>
+          </select>
+          <select value={prov} onChange={e => setProv(e.target.value)} style={{ ...inputStyle, width: 140 }}>
+            <option value="">all provenance</option><option value="real_inference">real inference</option>
+            <option value="recorded">recorded</option><option value="synthetic">synthetic</option>
+          </select>
+          <Btn small kind="ghost" onClick={() => setSelected(obs.map(o => o.id))}>select page</Btn>
+          <Btn small kind="ghost" onClick={() => setSelected([])}>clear</Btn>
+        </div>}>
+        <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+          <Table head={['', 'Sensor', 'Class', 'Conf.', 'Observed (UTC)', 'Lat / Lon', 'Track', 'σ', 'Provenance']}
+            empty="No observations. Run inference, radar import, replay or the synthetic tests first."
+            rows={obs.map(o => [
+              <input type="checkbox" checked={selected.includes(o.id)} onChange={() => toggle(o.id)} />,
+              `${sensorIcon(o.sensor_type)} ${o.sensor_type}`, o.object_class ?? '—', fmtConf(o.confidence),
+              o.observation_timestamp ? formatTs(o.observation_timestamp) : <span style={{ color: C.amber }}>missing</span>,
+              o.latitude != null ? `${o.latitude.toFixed(5)}, ${o.longitude?.toFixed(5)}` : <span style={{ color: C.amber }}>{o.bbox_x1 != null ? 'pixel bbox only' : 'missing'}</span>,
+              o.radar_track_id ?? '—', o.uncertainty != null ? o.uncertainty.toFixed(1) : '—', <ProvBadge p={o.data_provenance} />])} />
         </div>
-      </div>
-
-      {/* Correlations */}
-      <div style={s.card}>
-        <h3 style={s.cardTitle}>Correlation Decisions ({correlations.length})</h3>
-        {correlations.length === 0
-          ? <p style={s.noData}>No correlation decisions yet — select observations and run correlation.</p>
-          : (
-            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-              <table style={s.table}>
-                <thead><tr>{['Status', 'Obs IDs', 'Temporal Δ', 'Spatial Δ', 'Missing Metadata', 'Reason'].map(h => <th key={h} style={s.th}>{h}</th>)}</tr></thead>
-                <tbody>
-                  {correlations.map(c => (
-                    <tr key={c.id}>
-                      <td style={s.td}>
-                        <span style={{ color: corrColour(c.decision_status), fontWeight: 600, fontSize: 12 }}>{c.decision_status}</span>
-                      </td>
-                      <td style={{ ...s.td, fontFamily: 'monospace', fontSize: 11 }}>
-                        {(c.observation_ids ?? []).map(id => id.slice(0, 8)).join(', ')}
-                      </td>
-                      <td style={s.td}>{c.temporal_delta_s != null ? `${c.temporal_delta_s.toFixed(0)}s` : '—'}</td>
-                      <td style={s.td}>{c.spatial_distance_m != null ? `${c.spatial_distance_m.toFixed(0)}m` : '—'}</td>
-                      <td style={s.td}>
-                        {(c.missing_metadata ?? []).length > 0
-                          ? <span style={{ color: '#fbbf24', fontSize: 11 }}>{(c.missing_metadata ?? []).join(', ')}</span>
-                          : <span style={{ color: '#22c55e', fontSize: 11 }}>none</span>}
-                      </td>
-                      <td style={{ ...s.td, fontSize: 11, maxWidth: 260 }}>{trunc(c.reason, 80)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-      </div>
-
-      {/* Events */}
-      <div style={s.card}>
-        <h3 style={s.cardTitle}>Prioritized Events ({events.length})</h3>
-        {events.length === 0
-          ? <p style={s.noData}>No events yet.</p>
-          : (
-            <div style={{ maxHeight: 300, overflowY: 'auto' }}>
-              <table style={s.table}>
-                <thead><tr>{['Priority', 'Review Status', 'Sensors', 'Evidence', 'Provenance', 'Time', 'Actions'].map(h => <th key={h} style={s.th}>{h}</th>)}</tr></thead>
-                <tbody>
-                  {events.map(e => (
-                    <tr key={e.id}>
-                      <td style={s.td}>
-                        <span style={{ color: priorityColour(e.review_priority), fontWeight: 700 }}>{e.review_priority}</span>
-                      </td>
-                      <td style={s.td}>{e.review_status}</td>
-                      <td style={s.td}>{(e.source_sensors ?? []).join(', ') || '—'}</td>
-                      <td style={{ ...s.td, fontSize: 11, maxWidth: 240 }}>{trunc(e.evidence_summary, 70)}</td>
-                      <td style={s.td}><span style={{ color: e.data_provenance === 'synthetic' ? '#a78bfa' : '#60a5fa', fontSize: 11 }}>{e.data_provenance}</span></td>
-                      <td style={s.td}>{formatTs(e.created_at)}</td>
-                      <td style={s.td}>
-                        <button style={s.btnXs} onClick={() => setSelectedEvent(e)}>🔍 Review</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-      </div>
-
-      {/* Event review panel */}
-      {selectedEvent && (
-        <div style={s.reviewPanel}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <h3 style={{ ...s.cardTitle, color: priorityColour(selectedEvent.review_priority) }}>
-              {selectedEvent.review_priority} PRIORITY EVENT — {selectedEvent.id.slice(0, 12)}
-            </h3>
-            <button style={s.btnXs} onClick={() => setSelectedEvent(null)}>✕ Close</button>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginTop: 12, flexWrap: 'wrap' }}>
+          <div style={{ width: 170 }}><Field label="Temporal window (s)"><input type="number" value={temporal} onChange={e => setTemporal(+e.target.value)} style={inputStyle} /></Field></div>
+          <div style={{ width: 170 }}><Field label="Spatial threshold (m)"><input type="number" value={spatial} onChange={e => setSpatial(+e.target.value)} style={inputStyle} /></Field></div>
+          <div style={{ marginBottom: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Btn onClick={doCorrelate}>Run correlation {selected.length ? `(${selected.length})` : '(latest 20)'}</Btn>
+            <Btn kind="ok" onClick={() => doEvents(false)}>Create events from correlated groups</Btn>
+            <Btn kind="ghost" onClick={() => doEvents(true)}>…including single observations</Btn>
           </div>
-
-          <div style={s.evidenceGrid}>
-            <div><span style={s.evLabel}>Review Status</span><br />{selectedEvent.review_status}</div>
-            <div><span style={s.evLabel}>Source Sensors</span><br />{(selectedEvent.source_sensors ?? []).join(', ') || '—'}</div>
-            <div><span style={s.evLabel}>Observations</span><br />{(selectedEvent.observation_ids ?? []).length}</div>
-            <div><span style={s.evLabel}>Uncertainty</span><br />{selectedEvent.uncertainty?.toFixed(2) ?? '—'}</div>
-            <div><span style={s.evLabel}>Provenance</span><br /><span style={{ color: selectedEvent.data_provenance === 'synthetic' ? '#a78bfa' : '#60a5fa' }}>{selectedEvent.data_provenance}</span></div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <span style={s.evLabel}>Evidence Summary</span>
-            <p style={{ color: '#cbd5e1', fontSize: 13, margin: '4px 0 0', lineHeight: 1.6 }}>{selectedEvent.evidence_summary}</p>
-          </div>
-          <div style={{ marginTop: 10 }}>
-            <span style={s.evLabel}>Priority Explanation</span>
-            <p style={{ color: '#94a3b8', fontSize: 12, margin: '4px 0 0', lineHeight: 1.6 }}>{selectedEvent.priority_explanation}</p>
-          </div>
-          {(selectedEvent.missing_information ?? []).length > 0 && (
-            <div style={{ marginTop: 10 }}>
-              <span style={s.evLabel}>Missing Information</span>
-              <ul style={{ color: '#fbbf24', fontSize: 12, margin: '4px 0 0' }}>
-                {(selectedEvent.missing_information ?? []).map((m, i) => <li key={i}>{m}</li>)}
-              </ul>
-            </div>
-          )}
-
-          <div style={{ marginTop: 14 }}>
-            <span style={s.evLabel}>Reviewer Notes</span>
-            <textarea value={reviewNotes} onChange={e => setReviewNotes(e.target.value)}
-              placeholder="Add analyst notes…" style={s.textarea} />
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-            {(['REVIEWING', 'REVIEWED', 'DISMISSED'] as const).map(status => (
-              <button key={status} style={{ ...s.btn, background: status === 'DISMISSED' ? '#7f1d1d' : status === 'REVIEWED' ? '#166534' : '#1e3a8a' }}
-                onClick={() => submitReview(status)}>
-                {status}
-              </button>
-            ))}
-          </div>
-          <p style={{ color: '#475569', fontSize: 11, marginTop: 8 }}>
-            ⚠️ Priority is a <strong>review recommendation</strong> only. Not a determination of hostile
-            intent or an autonomous operational decision.
-          </p>
         </div>
+      </Card>
+
+      {corr && corr.correlations && (
+        <Card title={`Correlation decisions · ${corr.total_pairs_checked} pairs`} style={{ marginBottom: 14 }} right={
+          <div style={{ display: 'flex', gap: 6 }}>{Object.entries(corr.summary ?? {}).map(([k, v]) => <Badge key={k} color={corrColour(k)}>{k} {v}</Badge>)}</div>}>
+          <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+            <Table head={['Decision', 'Pair', 'Δt (s)', 'Distance (m)', 'Missing metadata', 'Reason']}
+              rows={corr.correlations.map(d => [<Badge color={corrColour(d.decision_status)}>{d.decision_status}</Badge>,
+                <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{d.observation_ids.map(i => i.slice(0, 8)).join(' ↔ ')}</span>,
+                d.temporal_delta_s?.toFixed(1) ?? '—', d.spatial_distance_m?.toFixed(1) ?? '—',
+                (d.missing_metadata ?? []).join(', ') || '—', <span style={{ fontSize: 11.5 }}>{d.reason}</span>])} />
+          </div>
+          {!!corr.duplicates?.length && (
+            <p style={{ fontSize: 12, color: C.amber, marginTop: 8 }}>
+              {corr.duplicates.length} potential duplicate pair(s): {corr.duplicates.map(d => `${d.observation_ids.map(i => i.slice(0, 8)).join('/')} (${d.rule})`).join('; ')} — excluded from supporting evidence.
+            </p>)}
+          {corr.groups && <p style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>Groups: {corr.groups.filter(g => g.observation_ids.length > 1).length} multi-observation · {corr.groups.filter(g => g.observation_ids.length === 1).length} single.</p>}
+        </Card>
       )}
-    </div>
+
+      <Grid cols={2}>
+        <Card title={`Events (${events.length})`} right={
+          <div style={{ display: 'flex', gap: 6 }}>
+            <select value={prioFilter} onChange={e => setPrioFilter(e.target.value)} style={{ ...inputStyle, width: 110 }}>
+              <option value="">priority</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select>
+            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ ...inputStyle, width: 120 }}>
+              <option value="">status</option><option>PENDING</option><option>REVIEWING</option><option>REVIEWED</option><option>DISMISSED</option></select>
+          </div>}>
+          <div style={{ maxHeight: 520, overflowY: 'auto' }}>
+            <Table head={['Priority', 'Sensors', 'Obs.', 'Status', 'Created', 'Source']} empty="No events."
+              rows={events.map(e => [
+                <a onClick={() => openEvent(e.id)} style={{ cursor: 'pointer' }}><Badge color={PRIORITY_COL[e.review_priority]}>{e.review_priority}</Badge></a>,
+                <a onClick={() => openEvent(e.id)} style={{ cursor: 'pointer', color: detail?.id === e.id ? C.cyan : C.text }}>{(e.source_sensors ?? []).map(s => `${sensorIcon(s)} ${s}`).join(', ')}</a>,
+                e.observation_ids?.length ?? 0, e.review_status, formatTs(e.created_at), <ProvBadge p={e.data_provenance} />])} />
+          </div>
+        </Card>
+
+        <Card title="Event detail & human review" right={detail && (
+          <Btn small kind="ghost" onClick={async () => downloadJson(`event_${detail.id}.json`, await exportEvent(detail.id))}>Export evidence</Btn>)}>
+          {!detail ? <Empty>Select an event to inspect its evidence.</Empty> : (
+            <>
+              {detail.data_provenance === 'synthetic' && <Banner kind="synthetic">SYNTHETIC DEMONSTRATION — NOT LIVE SENSOR DATA</Banner>}
+              {detail.data_provenance === 'recorded' && <Banner kind="replay">From RECORDED DATA REPLAY — not a live feed.</Banner>}
+              <KV items={[
+                ['Event ID', detail.id], ['Review priority', <Badge color={PRIORITY_COL[detail.review_priority]}>{detail.review_priority}</Badge>],
+                ['Review status', detail.review_status], ['Source sensors', (detail.source_sensors ?? []).join(', ')],
+                ['Uncertainty', detail.uncertainty != null ? detail.uncertainty.toFixed(2) : '—'], ['Created', formatTs(detail.created_at)],
+              ]} />
+              <h4 style={h4}>Evidence summary</h4>
+              <p style={{ fontSize: 12.5 }}>{detail.evidence_summary}</p>
+              <h4 style={h4}>Why this priority</h4>
+              <ul style={{ fontSize: 12, paddingLeft: 18, color: '#cbd5e1' }}>
+                {(detail.priority_explanation ?? '').split(' | ').map((f, i) => <li key={i}>{f}</li>)}
+              </ul>
+              {!!detail.missing_information?.length && (<>
+                <h4 style={h4}>Missing information</h4>
+                <ul style={{ fontSize: 12, paddingLeft: 18, color: C.amber }}>{detail.missing_information.map((m, i) => <li key={i}>{m}</li>)}</ul>
+              </>)}
+              <h4 style={h4}>Linked observations (traceable to source)</h4>
+              <Table head={['Sensor', 'Class', 'Conf.', 'Observed', 'Source record', 'Model']}
+                rows={(detail.observations ?? []).map(o => [`${sensorIcon(o.sensor_type)} ${o.sensor_type}`, o.object_class ?? '—', fmtConf(o.confidence),
+                  formatTs(o.observation_timestamp), trunc(`${o.source_dataset ?? ''} ${o.source_record_id ?? o.id}`, 40),
+                  o.image_url ? <a href={o.image_url} target="_blank" rel="noreferrer" style={{ color: C.blue }}>{o.model_name ?? 'image'}</a> : (o.model_name ?? '—')])} />
+              <h4 style={h4}>Correlation decisions</h4>
+              <Table head={['Decision', 'Reason']} empty="No decisions linked (single-observation event)."
+                rows={(detail.correlations ?? []).map(d => [<Badge color={corrColour(d.decision_status)}>{d.decision_status}</Badge>, <span style={{ fontSize: 11.5 }}>{d.reason}</span>])} />
+              <h4 style={h4}>Review</h4>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Reviewer notes…" rows={3} style={{ ...inputStyle, resize: 'vertical' }} />
+              <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                <Btn small kind="ghost" onClick={() => review('REVIEWING')}>Mark reviewing</Btn>
+                <Btn small kind="ok" onClick={() => review('REVIEWED')}>Mark reviewed</Btn>
+                <Btn small kind="danger" onClick={() => review('DISMISSED')}>Dismiss</Btn>
+                <Btn small kind="ghost" onClick={() => review('PENDING')}>Reset to pending</Btn>
+              </div>
+              <h4 style={h4}>Review history</h4>
+              <Table head={['Time', 'From', 'To', 'Notes']} empty="No review actions yet."
+                rows={(detail.review_history ?? []).map(h => [formatTs(h.timestamp), h.previous_status ?? '—', h.new_status, h.notes ?? '—'])} />
+            </>
+          )}
+        </Card>
+      </Grid>
+
+      <Card title="Recent correlation decisions (stored)">
+        <Table head={['Time', 'Decision', 'Δt (s)', 'Distance (m)', 'Event', 'Reason']} empty="No decisions yet."
+          rows={history.map(d => [formatTs(d.created_at), <Badge color={corrColour(d.decision_status)}>{d.decision_status}</Badge>,
+            d.temporal_delta_s?.toFixed(1) ?? '—', d.spatial_distance_m?.toFixed(1) ?? '—', d.event_id ? d.event_id.slice(0, 8) : '—', trunc(d.reason, 110)])} />
+      </Card>
+    </Page>
   )
 }
 
-const s: Record<string, React.CSSProperties> = {
-  page: { padding: 24, color: '#e2e8f0', maxWidth: 1400 },
-  title: { margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#f1f5f9' },
-  sub: { margin: '0 0 12px', color: '#64748b', fontSize: 13 },
-  infoBox: { background: '#0f172a', border: '1px solid #1e3a8a', borderRadius: 8, padding: '10px 14px', color: '#93c5fd', fontSize: 12, marginBottom: 20, lineHeight: 1.6 },
-  row: { display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap' },
-  card: { background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20, marginBottom: 16 },
-  cardTitle: { margin: '0 0 4px', fontSize: 13, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1 },
-  btn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 7, padding: '8px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' },
-  btnSm: { background: '#1e293b', color: '#64748b', border: '1px solid #334155', borderRadius: 6, padding: '5px 10px', fontSize: 12, cursor: 'pointer' },
-  btnXs: { background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 5, padding: '4px 8px', fontSize: 11, cursor: 'pointer' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { textAlign: 'left', padding: '6px 10px', fontSize: 11, color: '#64748b', borderBottom: '1px solid #334155', textTransform: 'uppercase' },
-  td: { padding: '8px 10px', fontSize: 13, color: '#cbd5e1', borderBottom: '1px solid #1e293b' },
-  noData: { color: '#475569', fontStyle: 'italic', fontSize: 13 },
-  msgBox: { background: '#0f2a1a', border: '1px solid #166534', borderRadius: 6, padding: '8px 12px', color: '#86efac', fontSize: 13, marginBottom: 10 },
-  reviewPanel: { background: '#162032', border: '1px solid #1e3a5f', borderRadius: 10, padding: 20, marginBottom: 16 },
-  evidenceGrid: { display: 'flex', gap: 24, flexWrap: 'wrap', marginTop: 8 },
-  evLabel: { fontSize: 11, color: '#64748b', textTransform: 'uppercase' },
-  textarea: { width: '100%', minHeight: 80, background: '#0f172a', border: '1px solid #334155', borderRadius: 6, color: '#e2e8f0', padding: 8, fontSize: 13, resize: 'vertical', boxSizing: 'border-box', marginTop: 4 },
-}
+const h4: React.CSSProperties = { fontSize: 11, color: C.muted, margin: '14px 0 6px', textTransform: 'uppercase', letterSpacing: 0.6 }

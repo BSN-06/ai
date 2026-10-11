@@ -1,251 +1,167 @@
-import { useState, useEffect } from 'react'
-import { listModels, listDatasets, startTraining, listTrainingJobs, cancelTrainingJob } from '../utils/api'
+import { useEffect, useMemo, useState } from 'react'
+import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import {
+  cancelTrainingJob, getHealth, getTrainingJob, listDatasets, listModels, listTrainingJobs, startTraining, trainingPreflight,
+} from '../utils/api'
+import type { Dataset, ModelRecord, TrainingJob } from '../types'
 import { formatTs, statusColour } from '../utils/format'
-import type { ModelRecord, Dataset, TrainingJob } from '../types'
 import { usePolling } from '../hooks/usePolling'
+import {
+  Badge, Banner, Btn, C, Card, Empty, Field, Grid, KV, Page, Progress, Table, errMsg, inputStyle, tooltipStyle,
+} from '../components/ui'
+
+const LOSS_KEYS = ['train/box_loss', 'train/cls_loss', 'train/dfl_loss', 'val/box_loss', 'val/cls_loss', 'val/dfl_loss']
+const METRIC_KEYS = ['metrics/mAP50(B)', 'metrics/mAP50-95(B)', 'metrics/precision(B)', 'metrics/recall(B)']
+const LINE_COLS = [C.blue, C.amber, C.purple, C.cyan, C.red, C.green]
 
 export default function Training() {
   const [models, setModels] = useState<ModelRecord[]>([])
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [jobs, setJobs] = useState<TrainingJob[]>([])
-  const [selectedModel, setSelectedModel] = useState('')
-  const [selectedDataset, setSelectedDataset] = useState('')
+  const [modelId, setModelId] = useState('')
+  const [dataset, setDataset] = useState('')
   const [epochs, setEpochs] = useState(50)
-  const [batchSize, setBatchSize] = useState(16)
-  const [imageSize, setImageSize] = useState(640)
+  const [batch, setBatch] = useState(16)
+  const [imgsz, setImgsz] = useState(640)
+  const [lr, setLr] = useState('')
   const [device, setDevice] = useState('cpu')
-  const [message, setMessage] = useState<string | null>(null)
+  const [gpu, setGpu] = useState(false)
+  const [preflight, setPreflight] = useState<{ ok: boolean; problems: string[]; running_jobs: number } | null>(null)
+  const [selJob, setSelJob] = useState<string | null>(null)
+  const [jobDetail, setJobDetail] = useState<TrainingJob | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
-    listModels().then(setModels)
+    listModels().then(ms => { const t = ms.filter(m => m.sensor_type !== 'radar'); setModels(t); if (t[0]) setModelId(t[0].id) })
     listDatasets().then(setDatasets)
-    listTrainingJobs().then(data => setJobs(Array.isArray(data) ? data : []))
+    getHealth().then(h => setGpu(h.gpu_available))
   }, [])
 
-  // Poll job status every 5s
+  const model = models.find(m => m.id === modelId)
+  const dsOptions = useMemo(() => datasets.filter(d => d.sensor_type === model?.sensor_type), [datasets, model])
+  useEffect(() => { if (dsOptions.length && !dsOptions.some(d => d.name === dataset)) setDataset(dsOptions[0].name) }, [dsOptions, dataset])
+  useEffect(() => {
+    if (modelId && dataset) trainingPreflight(modelId, dataset, device).then(setPreflight).catch(e => setError(errMsg(e)))
+  }, [modelId, dataset, device])
+
   usePolling(async () => {
-    const data = await listTrainingJobs()
-    setJobs(Array.isArray(data) ? data : [])
-  }, 5000)
+    const js = await listTrainingJobs()
+    setJobs(js)
+    const id = selJob ?? js[0]?.id
+    if (id) setJobDetail(await getTrainingJob(id))
+  }, 3000)
 
   const submit = async () => {
-    if (!selectedModel || !selectedDataset) {
-      setError('Select a model and dataset.')
-      return
-    }
-    setSubmitting(true); setError(null); setMessage(null)
+    setError(null); setMsg(null)
     try {
-      const r = await startTraining({
-        model_id: selectedModel,
-        dataset_name: selectedDataset,
-        epochs, batch_size: batchSize, image_size: imageSize, device,
-      })
-      setMessage(`Training job started — ID: ${r.job_id}`)
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      setError(msg ?? 'Failed to start training job.')
-    } finally { setSubmitting(false) }
+      const r = await startTraining({ model_id: modelId, dataset_name: dataset, epochs, batch_size: batch, image_size: imgsz,
+        learning_rate: lr ? Number(lr) : undefined, device })
+      setMsg(`Training job ${r.job_id} started in the background.`); setSelJob(r.job_id)
+    } catch (e) { setError(errMsg(e)) }
   }
 
-  const cancel = async (id: string) => {
-    await cancelTrainingJob(id)
-    setMessage('Cancellation requested.')
-    const data = await listTrainingJobs()
-    setJobs(Array.isArray(data) ? data : [])
-  }
-
-  const runningJob = jobs.find(j => j.status === 'RUNNING')
+  const hist = jobDetail?.epoch_history ?? []
+  const ds = datasets.find(d => d.name === dataset)
 
   return (
-    <div style={s.page}>
-      <h1 style={s.title}>🎓 Model Training</h1>
-      <p style={s.sub}>
-        Start a training job to fine-tune a YOLO model on a downloaded dataset.
-        Training runs as a background task — you can navigate away and return.
-        Jobs run on CPU by default; select CUDA if a compatible GPU is available.
-      </p>
-
-      <div style={s.warnBox}>
-        ⚠️ <strong>Prerequisites:</strong> The dataset must be downloaded, extracted, and its local path
-        set in the Datasets page before training can proceed. Training large datasets requires substantial
-        storage (10–20 GB), RAM, and time (hours on CPU, minutes on GPU). Do not start multiple jobs
-        simultaneously.
-      </div>
-
-      <div style={s.row}>
-        {/* Config form */}
-        <div style={s.card}>
-          <h3 style={s.cardTitle}>New Training Job</h3>
-          <div style={s.formGrid}>
-            <div style={s.formGroup}>
-              <label style={s.label}>Model</label>
-              <select style={s.select} value={selectedModel} onChange={e => setSelectedModel(e.target.value)}>
-                <option value="">— select model —</option>
-                {models.map(m => <option key={m.id} value={m.id}>{m.name} ({m.sensor_type})</option>)}
-              </select>
-            </div>
-
-            <div style={s.formGroup}>
-              <label style={s.label}>Dataset</label>
-              <select style={s.select} value={selectedDataset} onChange={e => setSelectedDataset(e.target.value)}>
-                <option value="">— select dataset —</option>
-                {datasets.map(d => (
-                  <option key={d.id} value={d.name}>
-                    {d.name} [{d.validation_status}]
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div style={s.formGroup}>
-              <label style={s.label}>Epochs: <strong>{epochs}</strong></label>
-              <input type="range" min={1} max={300} value={epochs}
-                onChange={e => setEpochs(parseInt(e.target.value))} style={s.slider} />
-            </div>
-
-            <div style={s.formGroup}>
-              <label style={s.label}>Batch Size: <strong>{batchSize}</strong></label>
-              <input type="range" min={1} max={64} step={1} value={batchSize}
-                onChange={e => setBatchSize(parseInt(e.target.value))} style={s.slider} />
-            </div>
-
-            <div style={s.formGroup}>
-              <label style={s.label}>Image Size: <strong>{imageSize}px</strong></label>
-              <select style={s.select} value={imageSize} onChange={e => setImageSize(parseInt(e.target.value))}>
-                {[320, 416, 512, 640, 768, 1024].map(sz => <option key={sz} value={sz}>{sz}px</option>)}
-              </select>
-            </div>
-
-            <div style={s.formGroup}>
-              <label style={s.label}>Device</label>
-              <select style={s.select} value={device} onChange={e => setDevice(e.target.value)}>
-                <option value="cpu">CPU</option>
-                <option value="cuda">CUDA (GPU)</option>
-                <option value="0">GPU 0</option>
-              </select>
-            </div>
+    <Page title="Model Training" subtitle="Fine-tune the satellite (xView) or thermal (FLIR ADAS) YOLO detector. Jobs run in a background worker; progress is persisted.">
+      <Banner kind="warn">
+        Training on full datasets needs substantial disk (xView ≈ 20 GB + tiles, FLIR ≈ 14 GB), RAM and time — days on CPU, hours on a GPU.
+        Only one training job runs at a time. A model is marked TRAINED only after a run completes and produces a checkpoint.
+      </Banner>
+      <Grid cols={3}>
+        <Card title="Configuration">
+          <Field label="Model">
+            <select value={modelId} onChange={e => setModelId(e.target.value)} style={inputStyle}>
+              {models.map(m => <option key={m.id} value={m.id}>{m.name} ({m.sensor_type}) · {m.status}</option>)}
+            </select>
+          </Field>
+          <Field label="Dataset" hint={ds ? `status: ${ds.validation_status} · train ${ds.train_count ?? '—'} / val ${ds.val_count ?? '—'} / test ${ds.test_count ?? '—'}` : undefined}>
+            <select value={dataset} onChange={e => setDataset(e.target.value)} style={inputStyle}>
+              {dsOptions.map(d => <option key={d.id} value={d.name}>{d.name} · {d.validation_status}</option>)}
+            </select>
+          </Field>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <Field label="Epochs"><input type="number" min={1} max={1000} value={epochs} onChange={e => setEpochs(+e.target.value)} style={inputStyle} /></Field>
+            <Field label="Batch size"><input type="number" min={1} max={128} value={batch} onChange={e => setBatch(+e.target.value)} style={inputStyle} /></Field>
+            <Field label="Image size"><input type="number" min={32} max={2048} step={32} value={imgsz} onChange={e => setImgsz(+e.target.value)} style={inputStyle} /></Field>
+            <Field label="Learning rate (lr0)"><input value={lr} placeholder="default 0.01" onChange={e => setLr(e.target.value)} style={inputStyle} /></Field>
           </div>
+          <Field label="Device" hint={gpu ? 'CUDA GPU detected.' : 'No CUDA GPU detected — CPU only.'}>
+            <select value={device} onChange={e => setDevice(e.target.value)} style={inputStyle}>
+              <option value="cpu">CPU</option>
+              <option value="cuda" disabled={!gpu}>CUDA {gpu ? '' : '(unavailable)'}</option>
+            </select>
+          </Field>
+        </Card>
+        <Card title="Pre-flight checks">
+          {preflight ? (
+            preflight.ok
+              ? <Banner kind="ok">All prerequisites met — dataset validated, dependencies installed.</Banner>
+              : <Banner kind="error"><strong>Training cannot start:</strong><ul style={{ paddingLeft: 18 }}>{preflight.problems.map((p, i) => <li key={i}>{p}</li>)}</ul></Banner>
+          ) : <Empty>Select a model and dataset.</Empty>}
+          {preflight && preflight.running_jobs > 0 && <Banner kind="warn">A training job is already running.</Banner>}
+          <Btn onClick={submit} disabled={!preflight?.ok || (preflight?.running_jobs ?? 0) > 0}>Start training</Btn>
+          {msg && <p style={{ color: C.green, fontSize: 12, marginTop: 8 }}>{msg}</p>}
+          {error && <p style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{error}</p>}
+          <h4 style={{ fontSize: 11, color: C.muted, margin: '14px 0 6px', textTransform: 'uppercase' }}>Equivalent command</h4>
+          <code style={{ fontSize: 11, color: '#cbd5e1', display: 'block', background: C.panel2, padding: 8, borderRadius: 6, wordBreak: 'break-all' }}>
+            python scripts/train.py --model {model?.name} --dataset {dataset} --epochs {epochs} --batch {batch} --imgsz {imgsz} --device {device}
+          </code>
+        </Card>
+        <Card title="Jobs">
+          <div style={{ maxHeight: 360, overflowY: 'auto' }}>
+            <Table head={['Job', 'Dataset', 'Status', 'Epoch']} empty="No training jobs yet."
+              rows={jobs.map(j => [<a onClick={() => setSelJob(j.id)} style={{ cursor: 'pointer', color: (selJob ?? jobs[0]?.id) === j.id ? C.cyan : C.blue }}>{j.id.slice(0, 8)}</a>,
+                j.dataset_name, <Badge color={statusColour(j.status)}>{j.status}</Badge>, `${j.current_epoch}/${j.total_epochs}`])} />
+          </div>
+        </Card>
+      </Grid>
 
-          {error && <div style={s.errBox}>⚠️ {error}</div>}
-          {message && <div style={s.msgBox}>✅ {message}</div>}
-
-          {runningJob && (
-            <div style={s.runningWarn}>
-              ⏳ A training job is already running (ID: {runningJob.id.slice(0, 8)}…).
-              Wait for it to finish or cancel it before starting a new one.
-            </div>
-          )}
-
-          <button
-            style={{ ...s.btn, opacity: (submitting || !!runningJob) ? 0.5 : 1 }}
-            disabled={submitting || !!runningJob}
-            onClick={submit}
-          >
-            {submitting ? '⏳ Submitting…' : '▶ Start Training'}
-          </button>
-        </div>
-
-        {/* Quick guide */}
-        <div style={{ ...s.card, minWidth: 260, maxWidth: 320 }}>
-          <h3 style={s.cardTitle}>Quick Guide</h3>
-          {[
-            ['1', 'Download dataset (see Datasets page)'],
-            ['2', 'Set dataset local path in Datasets page'],
-            ['3', 'Select model + dataset + settings above'],
-            ['4', 'Click Start Training'],
-            ['5', 'Monitor progress in the Jobs table'],
-            ['6', 'Run Evaluation after training completes'],
-          ].map(([n, t]) => (
-            <div key={n} style={s.step}>
-              <span style={s.stepNum}>{n}</span>
-              <span style={{ fontSize: 13, color: '#94a3b8' }}>{t}</span>
-            </div>
-          ))}
-          <p style={{ color: '#475569', fontSize: 11, marginTop: 12, lineHeight: 1.6 }}>
-            Training on CPU is slow but works. A GPU with 8+ GB VRAM is recommended for
-            YOLOv8n/s. YOLOv8m/l requires 16+ GB VRAM.
-          </p>
-        </div>
-      </div>
-
-      {/* Jobs table */}
-      <div style={s.card}>
-        <h3 style={s.cardTitle}>Training Jobs</h3>
-        {jobs.length === 0
-          ? <p style={s.noData}>No training jobs yet.</p>
-          : (
-            <table style={s.table}>
-              <thead>
-                <tr>{['ID', 'Model', 'Dataset', 'Status', 'Epoch', 'Device', 'mAP@50', 'Started', 'Completed', ''].map(h =>
-                  <th key={h} style={s.th}>{h}</th>)}</tr>
-              </thead>
-              <tbody>
-                {jobs.map(j => (
-                  <tr key={j.id}>
-                    <td style={{ ...s.td, fontFamily: 'monospace', fontSize: 11 }}>{j.id.slice(0, 8)}</td>
-                    <td style={s.td}>{j.model_id.slice(0, 8)}</td>
-                    <td style={s.td}>{j.dataset_name}</td>
-                    <td style={s.td}>
-                      <span style={{ color: statusColour(j.status), fontWeight: 600 }}>{j.status}</span>
-                    </td>
-                    <td style={s.td}>
-                      {j.status === 'RUNNING'
-                        ? <>
-                            {j.current_epoch}/{j.total_epochs}
-                            <div style={s.miniBar}>
-                              <div style={{ ...s.miniFill, width: `${j.total_epochs > 0 ? (j.current_epoch / j.total_epochs) * 100 : 0}%` }} />
-                            </div>
-                          </>
-                        : `${j.current_epoch}/${j.total_epochs}`}
-                    </td>
-                    <td style={s.td}>{j.device}</td>
-                    <td style={s.td}>{j.best_map50 != null ? `${(j.best_map50 * 100).toFixed(1)}%` : '—'}</td>
-                    <td style={s.td}>{formatTs(j.started_at)}</td>
-                    <td style={s.td}>{formatTs(j.completed_at)}</td>
-                    <td style={s.td}>
-                      {j.status === 'RUNNING' && (
-                        <button style={s.btnXs} onClick={() => cancel(j.id)}>Cancel</button>
-                      )}
-                      {j.error_message && (
-                        <span style={{ color: '#ef4444', fontSize: 11 }} title={j.error_message}>⚠️ Error</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-      </div>
-    </div>
+      {jobDetail && (
+        <>
+          <Card title={`Job ${jobDetail.id.slice(0, 8)} · ${jobDetail.dataset_name}`} style={{ marginBottom: 14 }} right={
+            (jobDetail.status === 'RUNNING' || jobDetail.status === 'PENDING') &&
+            <Btn small kind="danger" disabled={jobDetail.cancel_requested} onClick={() => cancelTrainingJob(jobDetail.id)}>
+              {jobDetail.cancel_requested ? 'Cancelling…' : 'Cancel job'}</Btn>}>
+            <div style={{ marginBottom: 10 }}><Progress value={jobDetail.total_epochs ? jobDetail.current_epoch / jobDetail.total_epochs : 0} color={statusColour(jobDetail.status)} /></div>
+            <Grid cols={2}>
+              <KV items={[['Status', <Badge color={statusColour(jobDetail.status)}>{jobDetail.status}</Badge>],
+                ['Epoch', `${jobDetail.current_epoch}/${jobDetail.total_epochs}`], ['Device', jobDetail.device],
+                ['Batch / imgsz', `${jobDetail.batch_size} / ${jobDetail.image_size}`], ['Train loss (sum)', jobDetail.train_loss ?? '—'],
+                ['Val loss (sum)', jobDetail.val_loss ?? '—'], ['Best val mAP@0.5', jobDetail.best_map50?.toFixed(4) ?? '—']]} />
+              <KV items={[['Started', formatTs(jobDetail.started_at)], ['Completed', formatTs(jobDetail.completed_at)],
+                ['Checkpoint', jobDetail.checkpoint_path ?? '—'], ['Error', jobDetail.error_message ?? '—']]} />
+            </Grid>
+          </Card>
+          <Grid cols={2}>
+            <Card title="Loss per epoch">
+              {hist.length ? (
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={hist}><CartesianGrid stroke="#1f2b45" strokeDasharray="3 3" />
+                    <XAxis dataKey="epoch" tick={{ fill: C.muted, fontSize: 11 }} /><YAxis tick={{ fill: C.muted, fontSize: 11 }} />
+                    <Tooltip contentStyle={tooltipStyle} /><Legend wrapperStyle={{ fontSize: 11 }} />
+                    {LOSS_KEYS.filter(k => k in hist[0]).map((k, i) => <Line key={k} dataKey={k} stroke={LINE_COLS[i]} dot={false} strokeDasharray={k.startsWith('val') ? '4 3' : undefined} />)}
+                  </LineChart>
+                </ResponsiveContainer>) : <Empty>No completed epochs yet.</Empty>}
+            </Card>
+            <Card title="Validation metrics per epoch (Ultralytics, val split)">
+              {hist.length ? (
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={hist}><CartesianGrid stroke="#1f2b45" strokeDasharray="3 3" />
+                    <XAxis dataKey="epoch" tick={{ fill: C.muted, fontSize: 11 }} /><YAxis domain={[0, 1]} tick={{ fill: C.muted, fontSize: 11 }} />
+                    <Tooltip contentStyle={tooltipStyle} /><Legend wrapperStyle={{ fontSize: 11 }} />
+                    {METRIC_KEYS.filter(k => k in hist[0]).map((k, i) => <Line key={k} dataKey={k} stroke={LINE_COLS[i]} dot={false} />)}
+                  </LineChart>
+                </ResponsiveContainer>) : <Empty>No completed epochs yet.</Empty>}
+            </Card>
+          </Grid>
+          <Card title="Job log (tail)">
+            <pre style={{ fontSize: 11, color: '#94a3b8', maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{jobDetail.log_tail || 'No log yet.'}</pre>
+          </Card>
+        </>
+      )}
+    </Page>
   )
-}
-
-const s: Record<string, React.CSSProperties> = {
-  page: { padding: 24, color: '#e2e8f0', maxWidth: 1200 },
-  title: { margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#f1f5f9' },
-  sub: { margin: '0 0 12px', color: '#64748b', fontSize: 13 },
-  warnBox: { background: '#1c1a0a', border: '1px solid #92400e', borderRadius: 8, padding: '10px 14px', color: '#fbbf24', fontSize: 13, marginBottom: 20 },
-  row: { display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap' },
-  card: { background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20, flex: 1, marginBottom: 16 },
-  cardTitle: { margin: '0 0 16px', fontSize: 13, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1 },
-  formGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 },
-  formGroup: { display: 'flex', flexDirection: 'column', gap: 6 },
-  label: { fontSize: 13, color: '#94a3b8' },
-  select: { background: '#0f172a', border: '1px solid #334155', borderRadius: 6, color: '#e2e8f0', padding: '8px 10px', fontSize: 13 },
-  slider: { accentColor: '#3b82f6' },
-  btn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 20px', fontSize: 14, fontWeight: 600, cursor: 'pointer' },
-  btnXs: { background: '#7f1d1d', color: '#fca5a5', border: 'none', borderRadius: 4, padding: '3px 8px', fontSize: 11, cursor: 'pointer' },
-  errBox: { background: '#1c080822', border: '1px solid #7f1d1d', borderRadius: 6, padding: '8px 12px', color: '#f87171', fontSize: 13, marginBottom: 10 },
-  msgBox: { background: '#0f2a1a', border: '1px solid #166534', borderRadius: 6, padding: '8px 12px', color: '#86efac', fontSize: 13, marginBottom: 10 },
-  runningWarn: { background: '#1c1a0a', border: '1px solid #92400e', borderRadius: 6, padding: '8px 12px', color: '#fbbf24', fontSize: 13, marginBottom: 10 },
-  step: { display: 'flex', gap: 10, alignItems: 'flex-start', padding: '6px 0', borderBottom: '1px solid #0f172a' },
-  stepNum: { background: '#1e3a8a', color: '#93c5fd', borderRadius: '50%', width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { textAlign: 'left', padding: '6px 10px', fontSize: 11, color: '#64748b', borderBottom: '1px solid #334155', textTransform: 'uppercase' },
-  td: { padding: '8px 10px', fontSize: 13, color: '#cbd5e1', borderBottom: '1px solid #1e293b' },
-  noData: { color: '#475569', fontStyle: 'italic', fontSize: 13 },
-  miniBar: { height: 4, background: '#0f172a', borderRadius: 2, marginTop: 2, overflow: 'hidden', width: 80 },
-  miniFill: { height: '100%', background: '#3b82f6', borderRadius: 2, transition: 'width 0.4s' },
 }

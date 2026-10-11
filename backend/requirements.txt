@@ -1,32 +1,26 @@
-# Core
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-python-multipart>=0.0.7
-pydantic>=2.7.0
-pydantic-settings>=2.3.0
+# Versions in comments are the ones the test suite was verified with (Python 3.13, Linux, CPU).
+# Core API
+fastapi>=0.110.0            # 0.143.0
+uvicorn[standard]>=0.27.0   # 0.54.0
+python-multipart>=0.0.7     # 0.0.32
+pydantic>=2.7.0             # 2.14.0
+pydantic-settings>=2.3.0    # 2.15.0
+sqlalchemy>=2.0.30          # 2.1.4
+PyYAML>=6.0                 # 6.0.3
 
-# Database
-sqlalchemy>=2.0.30
-aiosqlite>=0.19.0
-
-# ML / CV
-torch>=2.0.0
-torchvision>=0.15.0
-ultralytics>=8.0.0
+# Data / CV
+numpy>=1.24.0               # 2.5.4
+pandas>=2.0.0               # 3.0.6
 opencv-python-headless>=4.8.0
 Pillow>=10.0.0
-numpy>=1.24.0
-pandas>=2.0.0
 scikit-learn>=1.3.0
+scipy>=1.10.0               # 1.18.1 (Hungarian assignment for radar association)
 
-# Utilities
-python-dateutil>=2.8.0
-pytz>=2023.3
+# Deep learning (CPU wheels are fine; for a CUDA GPU install torch first from https://pytorch.org/get-started/locally/)
+torch>=2.0.0                # 2.14.1
+torchvision>=0.15.0         # 0.29.1
+ultralytics>=8.0.0          # 8.4.175
 
 # Testing
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-httpx>=0.25.0
-
-# Logging
-structlog>=23.2.0
+pytest>=7.4.0               # 9.1.1
+httpx>=0.25.0               # 0.28.1

@@ -151,6 +151,24 @@ def calculate_priority(
         score += 5
         factors.append(f"{num_obs} supporting observations.")
 
+    # ── Factor 8: Data freshness (relative to reference time) ──
+    reference_time = config.get("reference_time")
+    timestamps = [o.get("observation_timestamp") for o in observations if o.get("observation_timestamp")]
+    if reference_time is not None and timestamps:
+        parsed = [datetime.fromisoformat(t) if isinstance(t, str) else t for t in timestamps]
+        age_s = (reference_time - max(parsed)).total_seconds()
+        stale_after = config.get("stale_after_seconds", 3600)
+        if age_s > stale_after:
+            score -= 10
+            factors.append(f"Stale data: newest observation is {age_s / 60:.0f} min older than the reference time.")
+        else:
+            factors.append(f"Fresh data: newest observation is {max(age_s, 0) / 60:.0f} min old.")
+
+    # ── Factor 9: Duplicates (reported, never counted as support) ──
+    num_duplicates = config.get("num_duplicates", 0)
+    if num_duplicates:
+        factors.append(f"{num_duplicates} duplicate record(s) excluded from supporting evidence.")
+
     # ── Map score to priority ──
     score = max(0, min(100, score))
 
@@ -169,7 +187,8 @@ def calculate_priority(
         f"Event based on {num_obs} observation(s) from {num_sensors} sensor type(s). "
         f"{'Cross-sensor correlation confirmed. ' if correlated_count > 0 else ''}"
         f"Internal priority score: {score:.0f}/100. "
-        f"This is a review-priority recommendation, NOT a determination of hostile intent."
+        f"This is a recommendation for human review only; it does not assess intent "
+        f"and is not an operational decision."
     )
 
     return {
@@ -185,4 +204,5 @@ def calculate_priority(
         "data_provenance": observations[0].get("data_provenance", "real") if observations else "unknown",
         "created_at": datetime.utcnow(),
         "internal_score": score,
+        "factors": factors,
     }

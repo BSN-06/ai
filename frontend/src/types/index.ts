@@ -15,14 +15,25 @@ export interface SystemHealth {
 }
 
 export interface SystemStats {
-  observations: { total: number; by_sensor: Record<string, number> }
-  events: { total: number; pending: number; by_priority: Record<string, number> }
-  models: { total: number; trained: number }
-  datasets: { total: number }
+  observations: { total: number; by_sensor: Record<string, number>; by_provenance: Record<string, number> }
+  events: { total: number; pending: number; by_priority: Record<string, number>; by_status: Record<string, number> }
+  models: {
+    total: number; trained: number
+    items: { id: string; name: string; sensor_type: string; status: string; evaluation_status: string; checkpoint_exists: boolean }[]
+    radar_tracker: { type: string; available: boolean }
+  }
+  datasets: { total: number; items: { name: string; sensor_type: string; validation_status: string }[] }
+  dependencies: Record<string, string | null>
+  processing_mode: string
+  replay: { status: string; processed_records: number; total_records: number; current_timestamp: string | null; replay_speed: number; queue_remaining: number; label: string }
+  radar: Record<string, unknown>
   training_jobs: TrainingJobSummary[]
+  evaluation_jobs: { id: string; status: string; model_id: string; dataset_name: string; map50: number | null; created_at: string }[]
   recent_observations: ObservationSummary[]
   recent_events: EventSummary[]
+  latency: { component: string; latency_ms: number | null; timestamp: string }[]
   errors: LogEntry[]
+  activity: LogEntry[]
 }
 
 // ─── Observations ────────────────────────────────────────────────────────────
@@ -53,6 +64,10 @@ export interface Observation {
   processing_status: string
   image_path: string | null
   annotated_image_path: string | null
+  image_url?: string | null
+  model_version?: string | null
+  checkpoint_id?: string | null
+  metadata_json?: Record<string, unknown> | null
   created_at: string
 }
 
@@ -62,6 +77,7 @@ export interface ObservationSummary {
   object_class: string | null
   confidence: number | null
   data_provenance: string
+  observation_timestamp: string | null
   created_at: string
 }
 
@@ -90,6 +106,9 @@ export interface Event {
   data_provenance: string
   created_at: string
   updated_at: string
+  observations?: Observation[]
+  correlations?: CorrelationDecision[]
+  review_history?: { previous_status: string | null; new_status: string; notes: string | null; timestamp: string }[]
 }
 
 export interface EventSummary {
@@ -98,6 +117,7 @@ export interface EventSummary {
   review_status: ReviewStatus
   source_sensors: string[] | null
   evidence_summary: string | null
+  data_provenance?: string
   created_at: string
 }
 
@@ -125,18 +145,18 @@ export interface CorrelationDecision {
 
 export interface CorrelationResult {
   status: string
+  message?: string
   correlations: CorrelationDecision[]
-  duplicates: unknown[]
+  duplicates: { observation_ids: string[]; sensor_type: string; temporal_delta_s: number | null; rule: string }[]
+  groups?: { observation_ids: string[]; duplicate_ids: string[] }[]
+  summary?: Record<string, number>
   total_pairs_checked: number
 }
 
 // ─── Datasets ────────────────────────────────────────────────────────────────
 export type DatasetValidationStatus =
-  | 'NOT_INSTALLED'
-  | 'NOT_VALIDATED'
-  | 'VALIDATED'
-  | 'NOT_FOUND'
-  | 'EMPTY'
+  | 'NOT_INSTALLED' | 'NOT_VALIDATED' | 'VALIDATED' | 'NOT_FOUND' | 'EMPTY'
+  | 'INVALID' | 'RAW_NEEDS_CONVERSION' | 'CONVERTING' | 'CONVERSION_FAILED'
 
 export interface Dataset {
   id: string
@@ -209,12 +229,17 @@ export interface TrainingJob {
   started_at: string | null
   completed_at: string | null
   created_at: string
+  cancel_requested?: boolean
+  epoch_history: Record<string, number>[]
+  config?: Record<string, unknown>
+  log_tail?: string
 }
 
 export interface TrainingJobSummary {
   id: string
   status: JobStatus
   model_id: string
+  dataset_name?: string
   current_epoch: number
   total_epochs: number
   created_at: string
@@ -232,7 +257,11 @@ export interface EvaluationJob {
   recall: number | null
   map50: number | null
   map50_95: number | null
-  per_class_metrics: Record<string, unknown> | null
+  per_class_metrics: Record<string, Record<string, number | string>> | null
+  confusion_matrix?: { labels: string[]; matrix: number[][]; axes: string } | null
+  checkpoint_path?: string | null
+  model_status_at_eval?: string | null
+  warnings?: string[] | null
   avg_inference_ms: number | null
   error_message: string | null
   report_path: string | null
@@ -268,11 +297,25 @@ export interface InferenceResult {
   timestamp: string
   warning?: string
   message?: string
+  model_status?: string
+  model_note?: string
+  tiled?: boolean
+  tile_size?: number | null
+  class_names?: string[]
+  warnings?: string[]
+  observation_ids?: string[]
+  image_url?: string
+  annotated_image_url?: string
+  modality_check?: { thermal_like: boolean; mean_saturation: number; method: string }
 }
 
 // ─── Radar ───────────────────────────────────────────────────────────────────
 export interface RadarTrackHistory {
   timestamp: string
+  source_id?: string | null
+  truth_id?: string | null
+  truth_x?: number | null
+  truth_y?: number | null
   measured_x: number | null
   measured_y: number | null
   estimated_x: number
@@ -307,6 +350,12 @@ export interface RadarProcessResult {
   processing_time_ms: number
   timestamp: string
   tracks: RadarTrack[]
+  coordinate_mode?: string
+  units?: string
+  observation_ids?: string[]
+  warnings?: string[]
+  report_id?: string
+  evaluation?: Record<string, unknown> & { metrics_available: string[]; metrics_unavailable: string[] }
 }
 
 // ─── Replay ──────────────────────────────────────────────────────────────────
@@ -324,6 +373,15 @@ export interface ReplayState {
   end_timestamp: string | null
   data_provenance: string
   label: string
+  progress?: number
+  queue_preview?: { id: string | null; sensor_type: string | null; observation_timestamp: string }[]
+  queue_remaining?: number
+  skipped_records?: number
+  stats?: { saved: number; rejected: number; events_created: number; events_updated: number }
+  event_timeline?: { event_id: string; action: string; review_priority: string; recorded_timestamp: string; source_sensors: string[]; observation_count: number }[]
+  errors?: string[]
+  source_file?: string | null
+  clock?: string
 }
 
 // ─── Synthetic ───────────────────────────────────────────────────────────────
@@ -333,11 +391,15 @@ export interface SyntheticScenarioResult {
   expected: Record<string, string>
   actual: {
     observations_saved: number
+    validation: { id: string; status: string; errors: string[]; warnings: string[] }[]
     correlation_result: string | null
     has_duplicates: boolean | null
-    event_priority: string
-    evidence_summary: string
+    event_priority: string | null
+    event_id: string | null
+    evidence_summary: string | null
+    priority_explanation: string | null
   }
+  checks: { check: string; expected: unknown; actual: unknown; pass: boolean }[]
   pass: boolean
 }
 
@@ -346,7 +408,25 @@ export interface SyntheticRunResult {
   total_scenarios: number
   passed: number
   failed: number
+  run_tag?: string
+  report_id?: string
   scenarios: Record<string, SyntheticScenarioResult>
+}
+
+// ─── Reports ─────────────────────────────────────────────────────────────────
+export interface Report {
+  id: string
+  report_type: string
+  timestamp: string
+  test_mode: string
+  source: string | null
+  model_checkpoint: string | null
+  num_samples: number
+  metrics: Record<string, unknown> | null
+  warnings: string[] | null
+  limitations: string[] | null
+  completion_status: string
+  body?: Record<string, unknown>
 }
 
 // ─── Logs ────────────────────────────────────────────────────────────────────

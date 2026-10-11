@@ -36,36 +36,72 @@ class ReplayEngine:
         self._pause_event = threading.Event()
         self._pause_event.set()  # Not paused initially
         self._callbacks: list = []
+        self.processor = None  # callable(record) -> dict outcome (set by the API layer)
+        self.source_file: Optional[str] = None
+        self.skipped_records: list[dict] = []
+        self.event_timeline: list[dict] = []
+        self.errors: list[str] = []
+        self.stats = {"saved": 0, "rejected": 0, "events_created": 0, "events_updated": 0}
+        self.started_wall: Optional[datetime] = None
+        self.completed_wall: Optional[datetime] = None
+        self.on_complete = None
 
-    def load_records(self, records: list[dict]) -> dict:
+    @staticmethod
+    def _ts_key(r: dict):
+        from app.services.observation_normalizer import parse_timestamp
+        return parse_timestamp(r.get("observation_timestamp"))[0]
+
+    def load_records(self, records: list[dict], source_file: Optional[str] = None) -> dict:
         """
-        Load records for replay. Records must have 'observation_timestamp'.
+        Load records for replay. Records are replayed in recorded-timestamp order; records
+        without a valid timestamp cannot be placed on the timeline and are reported as skipped.
         """
         if not records:
             return {"status": "error", "message": "No records provided"}
+        if self.status in ("PLAYING", "PAUSED"):
+            self.reset()
 
-        # Sort by timestamp
-        sorted_records = sorted(
-            records,
-            key=lambda r: r.get("observation_timestamp", "")
-        )
+        valid, skipped = [], []
+        for r in records:
+            if not isinstance(r, dict):
+                skipped.append({"record": str(r)[:80], "reason": "not an object"})
+                continue
+            try:
+                ts = self._ts_key(r)
+            except ValueError as e:
+                skipped.append({"record_id": r.get("id"), "reason": str(e)})
+                continue
+            if ts is None:
+                skipped.append({"record_id": r.get("id"), "reason": "missing observation_timestamp"})
+                continue
+            valid.append((ts, r))
+        if not valid:
+            return {"status": "error", "message": "No records with valid timestamps", "skipped": skipped}
+        valid.sort(key=lambda x: x[0])
+        sorted_records = [r for _, r in valid]
 
         self.records = sorted_records
+        self.skipped_records = skipped
+        self.source_file = source_file
         self.processed_records = []
+        self.event_timeline = []
+        self.errors = []
+        self.stats = {"saved": 0, "rejected": 0, "events_created": 0, "events_updated": 0}
         self.current_index = 0
         self.session_id = str(uuid.uuid4())
         self.status = "LOADED"
+        self.current_timestamp = None
 
         # Extract time range
-        timestamps = [r.get("observation_timestamp") for r in sorted_records if r.get("observation_timestamp")]
-        if timestamps:
-            self.start_timestamp = datetime.fromisoformat(timestamps[0]) if isinstance(timestamps[0], str) else timestamps[0]
-            self.end_timestamp = datetime.fromisoformat(timestamps[-1]) if isinstance(timestamps[-1], str) else timestamps[-1]
+        self.start_timestamp = valid[0][0]
+        self.end_timestamp = valid[-1][0]
 
         return {
             "status": "loaded",
             "session_id": self.session_id,
             "total_records": len(self.records),
+            "skipped_records": len(skipped),
+            "skipped": skipped[:20],
             "start_timestamp": str(self.start_timestamp),
             "end_timestamp": str(self.end_timestamp),
             "data_provenance": "recorded_replay",
@@ -80,7 +116,10 @@ class ReplayEngine:
         if self.status == "PLAYING":
             return {"status": "already_playing"}
 
+        if self.status == "COMPLETED":
+            self.reset()
         self.status = "PLAYING"
+        self.started_wall = datetime.utcnow()
         self._stop_event.clear()
         self._pause_event.set()
 
@@ -118,8 +157,13 @@ class ReplayEngine:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
+        self._stop_event.clear()
+        self._pause_event.set()
         self.current_index = 0
         self.processed_records = []
+        self.event_timeline = []
+        self.errors = []
+        self.stats = {"saved": 0, "rejected": 0, "events_created": 0, "events_updated": 0}
         self.current_timestamp = None
         self.status = "LOADED" if self.records else "STOPPED"
         return {"status": "reset", "total_records": len(self.records)}
@@ -137,17 +181,12 @@ class ReplayEngine:
                 break
 
             record = self.records[self.current_index]
-            ts = record.get("observation_timestamp")
-            if ts and isinstance(ts, str):
-                ts = datetime.fromisoformat(ts)
-            self.current_timestamp = ts
+            ts = self._ts_key(record)
 
             # Calculate delay based on replay speed
             if self.current_index > 0 and ts:
-                prev_ts = self.records[self.current_index - 1].get("observation_timestamp")
+                prev_ts = self._ts_key(self.records[self.current_index - 1])
                 if prev_ts:
-                    if isinstance(prev_ts, str):
-                        prev_ts = datetime.fromisoformat(prev_ts)
                     delta = (ts - prev_ts).total_seconds()
                     if delta > 0 and self.replay_speed > 0:
                         sleep_time = delta / self.replay_speed
@@ -158,9 +197,17 @@ class ReplayEngine:
                             if self._stop_event.is_set():
                                 break
 
+            self.current_timestamp = ts
             # Process the record
             record["_replay_processed_at"] = datetime.utcnow().isoformat()
             record["_replay_label"] = "RECORDED DATA — NOT LIVE INFERENCE"
+            if self.processor is not None:
+                try:
+                    outcome = self.processor(record, self) or {}
+                except Exception as e:  # never kill the replay loop
+                    outcome = {"status": "ERROR", "error": str(e)}
+                    self.errors.append(f"record {record.get('id')}: {e}")
+                record["_outcome"] = outcome
             self.processed_records.append(record)
 
             # Notify callbacks
@@ -174,6 +221,12 @@ class ReplayEngine:
 
         if self.current_index >= len(self.records):
             self.status = "COMPLETED"
+            self.completed_wall = datetime.utcnow()
+            if self.on_complete:
+                try:
+                    self.on_complete(self)
+                except Exception as e:
+                    self.errors.append(f"completion hook: {e}")
         elif self._stop_event.is_set():
             self.status = "STOPPED"
 
@@ -188,6 +241,19 @@ class ReplayEngine:
             "current_timestamp": str(self.current_timestamp) if self.current_timestamp else None,
             "start_timestamp": str(self.start_timestamp) if self.start_timestamp else None,
             "end_timestamp": str(self.end_timestamp) if self.end_timestamp else None,
+            "progress": round(self.current_index / len(self.records), 4) if self.records else 0.0,
+            "queue_preview": [
+                {"id": r.get("id"), "sensor_type": r.get("sensor_type"),
+                 "observation_timestamp": str(r.get("observation_timestamp"))}
+                for r in self.records[self.current_index:self.current_index + 8]
+            ],
+            "queue_remaining": max(len(self.records) - self.current_index, 0),
+            "skipped_records": len(self.skipped_records),
+            "stats": self.stats,
+            "event_timeline": self.event_timeline[-50:],
+            "errors": self.errors[-20:],
+            "source_file": self.source_file,
+            "clock": "recorded timestamps (not wall-clock time)",
             "data_provenance": "recorded_replay",
             "label": "RECORDED DATA REPLAY — NOT A LIVE SENSOR FEED",
         }

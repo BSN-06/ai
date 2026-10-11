@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings, BASE_DIR
 from app.db.database import init_db, SessionLocal
@@ -30,9 +29,8 @@ def seed_initial_data():
     """Seed the database with dataset and model registry entries."""
     db = SessionLocal()
     try:
-        # Only seed if empty
-        if db.query(dbm.Dataset).count() > 0:
-            return
+        existing_ds = {d.name for d in db.query(dbm.Dataset).all()}
+        existing_models = {m.name for m in db.query(dbm.ModelRegistry).all()}
 
         # ── Register known datasets ──
         datasets = [
@@ -61,10 +59,11 @@ def seed_initial_data():
                                     "Dataset is ~20GB. Contains satellite imagery with 60 object classes.",
                 setup_instructions=(
                     "1. Visit https://challenge.xviewdataset.org/ and register.\n"
-                    "2. Download the training images and labels.\n"
-                    "3. Extract to backend/data/datasets/xview/\n"
-                    "4. Convert annotations to YOLO format using the provided script.\n"
-                    "5. Validate the dataset through the dashboard."
+                    "2. Download train_images.tgz and train_labels.tgz (xView_train.geojson).\n"
+                    "3. Extract to backend/data/datasets/xview_raw/\n"
+                    "4. Convert: python scripts/convert_dataset.py --dataset xView --source data/datasets/xview_raw\n"
+                    "   (tiles to 640px chips; splits official train images into train/val/test by image id)\n"
+                    "5. The converter registers and validates data/datasets/xview_yolo automatically."
                 ),
             ),
             dbm.Dataset(
@@ -91,7 +90,7 @@ def seed_initial_data():
             dbm.Dataset(
                 name="FLIR_ADAS",
                 sensor_type="thermal",
-                source_url="https://www.flir.com/oem/adas/adas-dataset-form/",
+                source_url="https://oem.flir.com/en-in/solutions/automotive/adas-dataset-form/",
                 annotation_format="coco_json",
                 num_classes=5,
                 classes=["person", "car", "bicycle", "dog", "other_vehicle"],
@@ -99,12 +98,12 @@ def seed_initial_data():
                 access_requirements="Registration required at FLIR/Teledyne website. "
                                     "Contains thermal + visible paired images. ~14GB.",
                 setup_instructions=(
-                    "1. Visit https://www.flir.com/oem/adas/adas-dataset-form/\n"
-                    "2. Complete registration form.\n"
-                    "3. Download FLIR ADAS dataset.\n"
-                    "4. Extract to backend/data/datasets/flir_adas/\n"
-                    "5. Convert COCO annotations to YOLO format.\n"
-                    "6. Validate through the dashboard."
+                    "1. Visit https://oem.flir.com/en-in/solutions/automotive/adas-dataset-form/\n"
+                    "2. Complete registration form and download FLIR ADAS (v2 recommended).\n"
+                    "3. Extract to backend/data/datasets/flir_adas_raw/\n"
+                    "4. Convert: python scripts/convert_dataset.py --dataset FLIR_ADAS --source data/datasets/flir_adas_raw\n"
+                    "   (thermal images only; RGB folders are excluded; class names taken from coco.json)\n"
+                    "5. The converter registers and validates data/datasets/flir_adas_yolo automatically."
                 ),
             ),
             dbm.Dataset(
@@ -124,7 +123,8 @@ def seed_initial_data():
             ),
         ]
         for ds in datasets:
-            db.add(ds)
+            if ds.name not in existing_ds:
+                db.add(ds)
 
         # ── Register models ──
         models = [
@@ -133,9 +133,9 @@ def seed_initial_data():
                 sensor_type="satellite",
                 architecture="YOLOv8",
                 variant="yolov8n.pt",
-                backbone="CSPDarknet (Cross Stage Partial Darknet)",
-                neck="PAN-FPN (Path Aggregation Network with Feature Pyramid Network)",
-                head="Decoupled anchor-free detection head",
+                backbone="CSPDarknet-style backbone with C2f blocks + SPPF (Ultralytics YOLOv8)",
+                neck="PAN-FPN multiscale neck (P3/P4/P5, strides 8/16/32)",
+                head="Decoupled anchor-free head (separate cls / box branches, DFL box regression)",
                 dataset_name="xView",
                 pretrained=True,
                 trained=False,
@@ -155,9 +155,9 @@ def seed_initial_data():
                 sensor_type="thermal",
                 architecture="YOLOv8",
                 variant="yolov8n.pt",
-                backbone="CSPDarknet",
-                neck="PAN-FPN",
-                head="Decoupled anchor-free detection head",
+                backbone="CSPDarknet-style backbone with C2f blocks + SPPF (Ultralytics YOLOv8)",
+                neck="PAN-FPN multiscale neck (P3/P4/P5, strides 8/16/32)",
+                head="Decoupled anchor-free head (separate cls / box branches, DFL box regression)",
                 dataset_name="FLIR_ADAS",
                 pretrained=True,
                 trained=False,
@@ -173,7 +173,8 @@ def seed_initial_data():
             ),
         ]
         for m in models:
-            db.add(m)
+            if m.name not in existing_models:
+                db.add(m)
 
         db.commit()
         logger.info("Seeded initial datasets and models.")
@@ -214,10 +215,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files for uploads
-data_dir = BASE_DIR / "data"
-data_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(data_dir)), name="static")
+# NOTE: the data directory is intentionally NOT mounted as static files (it contains the database and
+# datasets). Uploaded/annotated images are served through the whitelisted /api/files endpoint.
 
 # Include API routes
 app.include_router(router, prefix="/api")
