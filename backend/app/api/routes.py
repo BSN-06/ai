@@ -430,10 +430,10 @@ def _image_inference(sensor: str, file: UploadFile, confidence: float, iou: floa
                         "spatial correlation will be INSUFFICIENT_METADATA.")
 
     obs_ids = []
-    for det in result["detections"]:
+    for det_idx, det in enumerate(result["detections"]):
         raw = {
             "sensor_type": sensor, "observation_timestamp": ts, "is_utc": ts is not None,
-            "source_dataset": "user_upload", "source_record_id": Path(file_path).name,
+            "source_dataset": "user_upload", "source_record_id": f"{Path(file_path).name}#det{det_idx}",
             "object_class": det["class_name"], "confidence": det["confidence"],
             "bbox_x1": det["bbox_x1"], "bbox_y1": det["bbox_y1"], "bbox_x2": det["bbox_x2"], "bbox_y2": det["bbox_y2"],
             "latitude": latitude, "longitude": longitude,

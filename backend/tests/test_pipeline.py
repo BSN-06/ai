@@ -189,3 +189,13 @@ def test_models_not_marked_trained(client):
     for m in client.get("/api/models").json():
         assert m["trained"] is False and m["status"] == "PRETRAINED"
         assert m["metrics"] is None
+
+
+def test_detections_from_one_image_are_not_duplicates():
+    """Different boxes from the same uploaded image must keep distinct source record ids."""
+    t = datetime(2024, 1, 1)
+    obs = [dict(_o("a", "satellite", None, None, None, "person", 0.9), source_dataset="user_upload",
+                source_record_id="img.jpg#det0"),
+           dict(_o("b", "satellite", None, None, None, "person", 0.8), source_dataset="user_upload",
+                source_record_id="img.jpg#det1")]
+    assert check_duplicates(obs) == []
