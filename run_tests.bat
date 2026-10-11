@@ -19,7 +19,8 @@ if not exist "venv\Scripts\activate.bat" (
 )
 
 call venv\Scripts\activate.bat
-python -m pytest tests/ -v --tb=short 2>&1
+REM Pass extra pytest args, e.g.:  run_tests.bat -k "not real_models"
+python -m pytest tests/ -v --tb=short %* 2>&1
 
 echo.
 echo ============================================================

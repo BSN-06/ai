@@ -1,263 +1,175 @@
-import { useHealth } from '../hooks/useHealth'
-import { formatTs, priorityColour, statusColour, sensorIcon } from '../utils/format'
+import { Link } from 'react-router-dom'
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, Cell,
 } from 'recharts'
+import { useHealth } from '../hooks/useHealth'
+import { formatTs, sensorIcon, statusColour, trunc } from '../utils/format'
+import {
+  Badge, Banner, C, Card, Empty, Grid, Page, PRIORITY_COL, ProvBadge, Progress, Stat, Table, tooltipStyle,
+} from '../components/ui'
 
-const PRIORITY_COLOURS: Record<string, string> = {
-  HIGH: '#ef4444', MEDIUM: '#f59e0b', LOW: '#22c55e',
-}
+const DS_COL: Record<string, string> = { VALIDATED: C.green, NOT_INSTALLED: C.dim, INVALID: C.red, CONVERTING: C.blue }
 
 export default function Dashboard() {
-  const { health, stats, error } = useHealth(4000)
+  const { health, stats, error } = useHealth(3000)
 
   if (error) {
     return (
-      <div style={styles.errorBox}>
-        <span style={{ fontSize: 24 }}>⚠️</span>
-        <div>
-          <strong>Backend unreachable</strong>
-          <p style={{ margin: '4px 0 0', color: '#94a3b8' }}>{error}</p>
-          <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 12 }}>
-            Start the backend: <code style={styles.code}>python -m uvicorn app.main:app --reload</code>
-          </p>
-        </div>
-      </div>
+      <Page title="System Overview">
+        <Banner kind="error">
+          <strong>Backend unreachable.</strong> {error}<br />
+          Start it with <code>start_backend.bat</code> (or <code>python -m uvicorn app.main:app --port 8000</code> in <code>backend/</code>).
+        </Banner>
+      </Page>
     )
   }
+  if (!health || !stats) return <Page title="System Overview"><Empty>Connecting to backend…</Empty></Page>
 
-  if (!health || !stats) {
-    return <div style={styles.loading}>Connecting to backend…</div>
-  }
-
-  const sensorData = Object.entries(stats.observations.by_sensor).map(([k, v]) => ({
-    name: k.charAt(0).toUpperCase() + k.slice(1), value: v,
-  }))
-
-  const priorityData = Object.entries(stats.events.by_priority).map(([k, v]) => ({
-    name: k, value: v, fill: PRIORITY_COLOURS[k],
-  }))
+  const sensorData = Object.entries(stats.observations.by_sensor).map(([k, v]) => ({ name: k, value: v }))
+  const provData = Object.entries(stats.observations.by_provenance).map(([k, v]) => ({ name: k, value: v }))
+  const prioData = (['HIGH', 'MEDIUM', 'LOW'] as const).map(p => ({ name: p, value: stats.events.by_priority[p] ?? 0 }))
+  const latency = stats.latency.filter(l => l.latency_ms != null).map((l, i) => ({ i: i + 1, ms: l.latency_ms, c: l.component }))
+  const replay = stats.replay
+  const replayActive = replay.status === 'PLAYING' || replay.status === 'PAUSED'
 
   return (
-    <div style={styles.page}>
-      {/* Header */}
-      <div style={styles.header}>
-        <div>
-          <h1 style={styles.title}>System Overview</h1>
-          <p style={styles.subtitle}>
-            AI-Assisted Multi-Sensor Surveillance — Offline Research Prototype
-          </p>
+    <Page title="System Overview" subtitle="Monitoring console — all figures come from stored records and service state."
+      right={
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Badge color={C.green}>● {health.status.toUpperCase()}</Badge>
+          <Badge color={C.blue}>{health.device.toUpperCase()}{health.gpu_available ? ' · GPU' : ' · CPU-only'}</Badge>
+          <Badge color={replayActive ? C.cyan : C.muted}>MODE: {replayActive ? 'RECORDED REPLAY' : 'IDLE / ON-DEMAND'}</Badge>
         </div>
-        <div style={styles.statusPill}>
-          <span style={{ ...styles.dot, background: health.status === 'operational' ? '#22c55e' : '#ef4444' }} />
-          {health.status.toUpperCase()} · {health.device.toUpperCase()} ·{' '}
-          {health.gpu_available ? '🟢 GPU' : '🔵 CPU'}
-        </div>
-      </div>
+      }>
+      {replayActive && (
+        <Banner kind="replay">
+          <strong>RECORDED DATA REPLAY — NOT A LIVE SENSOR FEED.</strong> {replay.processed_records}/{replay.total_records} records ·
+          recorded time {formatTs(replay.current_timestamp)} · speed ×{replay.replay_speed} · queue {replay.queue_remaining}
+          <div style={{ marginTop: 6 }}><Progress value={replay.total_records ? replay.processed_records / replay.total_records : 0} color={C.cyan} /></div>
+        </Banner>
+      )}
 
-      {/* KPI row */}
-      <div style={styles.kpiRow}>
-        {[
-          { label: 'Total Observations', value: stats.observations.total, icon: '👁️' },
-          { label: 'Total Events', value: stats.events.total, icon: '📋' },
-          { label: 'Pending Review', value: stats.events.pending, icon: '⏳' },
-          { label: 'Models Registered', value: stats.models.total, icon: '🧠' },
-          { label: 'Datasets', value: stats.datasets.total, icon: '🗄️' },
-          { label: 'Models Trained', value: stats.models.trained, icon: '✅' },
-        ].map(kpi => (
-          <div key={kpi.label} style={styles.kpiCard}>
-            <span style={styles.kpiIcon}>{kpi.icon}</span>
-            <span style={styles.kpiValue}>{kpi.value}</span>
-            <span style={styles.kpiLabel}>{kpi.label}</span>
+      <Grid cols={4}>
+        <Stat label="Observations" value={stats.observations.total}
+          sub={`real ${stats.observations.by_provenance.real_inference ?? 0} · recorded ${stats.observations.by_provenance.recorded ?? 0} · synthetic ${stats.observations.by_provenance.synthetic ?? 0}`} />
+        <Stat label="Events awaiting review" value={stats.events.pending} color={stats.events.pending ? C.amber : undefined}
+          sub={`${stats.events.total} total`} />
+        <Stat label="High-priority events" value={stats.events.by_priority.HIGH ?? 0} color={C.red} sub="review recommendation only" />
+        <Stat label="Models fine-tuned" value={`${stats.models.trained}/${stats.models.total}`} />
+        <Stat label="Datasets validated" value={`${stats.datasets.items.filter(d => d.validation_status === 'VALIDATED').length}/${stats.datasets.total}`} />
+        <Stat label="Processing errors" value={stats.errors.filter(e => e.level === 'ERROR').length} color={stats.errors.some(e => e.level === 'ERROR') ? C.red : undefined} />
+      </Grid>
+
+      <Grid cols={3}>
+        <Card title="Observations by sensor">
+          {sensorData.every(d => !d.value) ? <Empty>No observations yet — run inference, radar import, replay or synthetic tests.</Empty> : (
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={sensorData}><XAxis dataKey="name" tick={{ fill: C.muted, fontSize: 12 }} />
+                <YAxis allowDecimals={false} tick={{ fill: C.muted, fontSize: 12 }} /><Tooltip contentStyle={tooltipStyle} />
+                <Bar dataKey="value" fill={C.blue} radius={[4, 4, 0, 0]} /></BarChart>
+            </ResponsiveContainer>)}
+          <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+            {provData.map(p => <span key={p.name}><ProvBadge p={p.name} /> <span style={{ fontSize: 11, color: C.muted }}>{p.value}</span></span>)}
           </div>
-        ))}
-      </div>
+        </Card>
+        <Card title="Event review-priority distribution">
+          {prioData.every(d => !d.value) ? <Empty>No events yet.</Empty> : (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={prioData} layout="vertical"><XAxis type="number" allowDecimals={false} tick={{ fill: C.muted, fontSize: 12 }} />
+                <YAxis type="category" dataKey="name" tick={{ fill: C.muted, fontSize: 12 }} width={70} /><Tooltip contentStyle={tooltipStyle} />
+                <Bar dataKey="value" radius={[0, 4, 4, 0]}>{prioData.map(d => <Cell key={d.name} fill={PRIORITY_COL[d.name]} />)}</Bar>
+              </BarChart>
+            </ResponsiveContainer>)}
+          <div style={{ fontSize: 11, color: C.dim }}>
+            {Object.entries(stats.events.by_status).map(([k, v]) => `${k} ${v}`).join(' · ')}
+          </div>
+        </Card>
+        <Card title="Processing latency (last runs)">
+          {!latency.length ? <Empty>No inference or tracking runs recorded yet.</Empty> : (
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={latency}><CartesianGrid stroke="#1f2b45" strokeDasharray="3 3" />
+                <XAxis dataKey="i" tick={{ fill: C.muted, fontSize: 11 }} /><YAxis unit="ms" tick={{ fill: C.muted, fontSize: 11 }} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(v, _n, p) => [`${Number(v).toFixed(0)} ms`, (p.payload as { c: string }).c]} />
+                <Line dataKey="ms" stroke={C.cyan} dot={{ r: 2 }} /></LineChart>
+            </ResponsiveContainer>)}
+        </Card>
+      </Grid>
 
-      {/* Charts row */}
-      <div style={styles.chartsRow}>
-        <div style={styles.chartCard}>
-          <h3 style={styles.cardTitle}>Observations by Sensor</h3>
-          {sensorData.every(d => d.value === 0)
-            ? <p style={styles.noData}>No observations yet — run inference or synthetic scenarios.</p>
-            : (
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={sensorData} margin={{ top: 8, right: 16, left: -16, bottom: 0 }}>
-                  <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 12 }} />
-                  <YAxis tick={{ fill: '#94a3b8', fontSize: 12 }} allowDecimals={false} />
-                  <Tooltip contentStyle={styles.tooltip} />
-                  <Bar dataKey="value" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-        </div>
-
-        <div style={styles.chartCard}>
-          <h3 style={styles.cardTitle}>Event Priority Distribution</h3>
-          {priorityData.every(d => d.value === 0)
-            ? <p style={styles.noData}>No events yet — run correlation or synthetic scenarios.</p>
-            : (
-              <ResponsiveContainer width="100%" height={200}>
-                <PieChart>
-                  <Pie data={priorityData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={70} label>
-                    {priorityData.map((entry) => (
-                      <Cell key={entry.name} fill={entry.fill} />
-                    ))}
-                  </Pie>
-                  <Tooltip contentStyle={styles.tooltip} />
-                  <Legend wrapperStyle={{ fontSize: 12, color: '#94a3b8' }} />
-                </PieChart>
-              </ResponsiveContainer>
-            )}
-        </div>
-      </div>
-
-      {/* Recent rows */}
-      <div style={styles.chartsRow}>
-        <div style={{ ...styles.chartCard, flex: 1 }}>
-          <h3 style={styles.cardTitle}>Recent Observations</h3>
-          {stats.recent_observations.length === 0
-            ? <p style={styles.noData}>None yet.</p>
-            : (
-              <table style={styles.table}>
-                <thead>
-                  <tr>{['Sensor', 'Class', 'Confidence', 'Provenance', 'Time'].map(h => (
-                    <th key={h} style={styles.th}>{h}</th>
-                  ))}</tr>
-                </thead>
-                <tbody>
-                  {stats.recent_observations.map(o => (
-                    <tr key={o.id} style={styles.tr}>
-                      <td style={styles.td}>{sensorIcon(o.sensor_type)} {o.sensor_type}</td>
-                      <td style={styles.td}>{o.object_class ?? '—'}</td>
-                      <td style={styles.td}>
-                        {o.confidence != null ? `${(o.confidence * 100).toFixed(1)}%` : '—'}
-                      </td>
-                      <td style={styles.td}>
-                        <span style={{
-                          ...styles.badge,
-                          background: o.data_provenance === 'synthetic' ? '#7c3aed22' : '#1e40af22',
-                          color: o.data_provenance === 'synthetic' ? '#a78bfa' : '#60a5fa',
-                        }}>
-                          {o.data_provenance}
-                        </span>
-                      </td>
-                      <td style={styles.td}>{formatTs(o.created_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-        </div>
-      </div>
-
-      <div style={styles.chartsRow}>
-        <div style={{ ...styles.chartCard, flex: 1 }}>
-          <h3 style={styles.cardTitle}>Recent Events</h3>
-          {stats.recent_events.length === 0
-            ? <p style={styles.noData}>None yet.</p>
-            : (
-              <table style={styles.table}>
-                <thead>
-                  <tr>{['Priority', 'Status', 'Sensors', 'Evidence', 'Time'].map(h => (
-                    <th key={h} style={styles.th}>{h}</th>
-                  ))}</tr>
-                </thead>
-                <tbody>
-                  {stats.recent_events.map(e => (
-                    <tr key={e.id} style={styles.tr}>
-                      <td style={styles.td}>
-                        <span style={{ ...styles.badge, background: priorityColour(e.review_priority) + '22', color: priorityColour(e.review_priority) }}>
-                          {e.review_priority}
-                        </span>
-                      </td>
-                      <td style={styles.td}>{e.review_status}</td>
-                      <td style={styles.td}>{(e.source_sensors ?? []).join(', ') || '—'}</td>
-                      <td style={{ ...styles.td, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {e.evidence_summary ?? '—'}
-                      </td>
-                      <td style={styles.td}>{formatTs(e.created_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-        </div>
-      </div>
-
-      {/* Training jobs */}
-      {stats.training_jobs.length > 0 && (
-        <div style={styles.chartCard}>
-          <h3 style={styles.cardTitle}>Active Training Jobs</h3>
-          {stats.training_jobs.map(j => (
-            <div key={j.id} style={styles.jobRow}>
-              <span style={{ color: '#94a3b8', fontSize: 12 }}>{j.id.slice(0, 8)}</span>
-              <span style={{ color: statusColour(j.status), fontWeight: 600 }}>{j.status}</span>
-              <span style={{ color: '#cbd5e1' }}>
-                Epoch {j.current_epoch}/{j.total_epochs}
-              </span>
-              {j.status === 'RUNNING' && (
-                <div style={styles.progressBar}>
-                  <div style={{
-                    ...styles.progressFill,
-                    width: `${j.total_epochs > 0 ? (j.current_epoch / j.total_epochs) * 100 : 0}%`,
-                  }} />
+      <Grid cols={3}>
+        <Card title="Model availability">
+          <Table head={['Model', 'Status', 'Eval', 'Checkpoint']} rows={[
+            ...stats.models.items.map(m => [
+              <span>{sensorIcon(m.sensor_type)} {m.name}</span>,
+              <Badge color={m.status === 'TRAINED' ? C.green : m.status === 'TRAINING' ? C.blue : C.amber}>{m.status}</Badge>,
+              <Badge color={statusColour(m.evaluation_status)}>{m.evaluation_status}</Badge>,
+              m.status === 'TRAINED' ? (m.checkpoint_exists ? '✔ on disk' : <span style={{ color: C.red }}>missing</span>) : 'COCO base',
+            ]),
+            [<span>📡 radar tracker</span>, <Badge color={C.green}>AVAILABLE</Badge>, '—', 'classical (no weights)'],
+          ]} />
+        </Card>
+        <Card title="Sensor data availability">
+          <Table head={['Dataset', 'Sensor', 'Status']} rows={stats.datasets.items.map(d => [
+            d.name, d.sensor_type, <Badge color={DS_COL[d.validation_status] ?? C.amber}>{d.validation_status}</Badge>])} />
+          <p style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Datasets require registration and manual download — see <Link to="/datasets" style={{ color: C.blue }}>Datasets</Link>.</p>
+        </Card>
+        <Card title="Training & evaluation jobs">
+          {!stats.training_jobs.length && !stats.evaluation_jobs.length ? <Empty>No jobs yet.</Empty> : (
+            <>
+              {stats.training_jobs.map(j => (
+                <div key={j.id} style={{ marginBottom: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                    <span>train · {j.dataset_name ?? ''} · {j.current_epoch}/{j.total_epochs}</span>
+                    <Badge color={statusColour(j.status)}>{j.status}</Badge>
+                  </div>
+                  <Progress value={j.total_epochs ? j.current_epoch / j.total_epochs : 0} />
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+              ))}
+              {stats.evaluation_jobs.map(j => (
+                <div key={j.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '3px 0' }}>
+                  <span>eval · {j.dataset_name} {j.map50 != null ? `· mAP50 ${j.map50.toFixed(3)}` : ''}</span>
+                  <Badge color={statusColour(j.status)}>{j.status}</Badge>
+                </div>
+              ))}
+            </>
+          )}
+        </Card>
+      </Grid>
 
-      {/* Errors */}
-      {stats.errors.length > 0 && (
-        <div style={{ ...styles.chartCard, borderColor: '#7f1d1d' }}>
-          <h3 style={{ ...styles.cardTitle, color: '#f87171' }}>⚠️ Recent Errors</h3>
-          {stats.errors.map((e, i) => (
-            <div key={i} style={styles.errorRow}>
-              <span style={{ color: '#f87171', fontWeight: 600, fontSize: 12 }}>{e.level}</span>
-              <span style={{ color: '#94a3b8', fontSize: 12 }}>{e.component}</span>
-              <span style={{ color: '#e2e8f0' }}>{e.message}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      <Grid cols={2}>
+        <Card title="Recent observations">
+          <Table head={['Sensor', 'Class', 'Conf.', 'Observed (UTC)', 'Provenance']} empty="None yet."
+            rows={stats.recent_observations.map(o => [
+              `${sensorIcon(o.sensor_type)} ${o.sensor_type}`, o.object_class ?? '—',
+              o.confidence != null ? `${(o.confidence * 100).toFixed(0)}%` : '—',
+              o.observation_timestamp ? formatTs(o.observation_timestamp) : <span style={{ color: C.amber }}>no timestamp</span>,
+              <ProvBadge p={o.data_provenance} />])} />
+        </Card>
+        <Card title="Recent events" right={<Link to="/fusion" style={{ fontSize: 12, color: C.blue }}>Open fusion →</Link>}>
+          <Table head={['Priority', 'Sensors', 'Status', 'Summary', 'Source']} empty="No events yet."
+            rows={stats.recent_events.map(e => [
+              <Badge color={PRIORITY_COL[e.review_priority]}>{e.review_priority}</Badge>,
+              (e.source_sensors ?? []).map(sensorIcon).join(' '), e.review_status, trunc(e.evidence_summary, 70),
+              <ProvBadge p={e.data_provenance} />])} />
+        </Card>
+      </Grid>
 
-      <p style={styles.footer}>
-        Last updated: {formatTs(health.timestamp)} · Database: {health.database}
-      </p>
-    </div>
+      <Grid cols={2}>
+        <Card title="Recent activity">
+          <Table head={['Time', 'Component', 'Message']} empty="No activity logged yet."
+            rows={stats.activity.map(a => [formatTs(a.timestamp), a.component ?? '—',
+              <span style={{ color: a.level === 'ERROR' ? C.red : a.level === 'WARNING' ? C.amber : undefined }}>{trunc(a.message, 90)}</span>])} />
+        </Card>
+        <Card title="Warnings & errors">
+          <Table head={['Level', 'Component', 'Message', 'Time']} empty="No warnings or errors."
+            rows={stats.errors.map(e => [<Badge color={e.level === 'ERROR' ? C.red : C.amber}>{e.level}</Badge>,
+              e.component ?? '—', trunc(e.message, 80), formatTs(e.timestamp)])} />
+          <h4 style={{ fontSize: 11, color: C.muted, margin: '12px 0 4px', textTransform: 'uppercase' }}>Dependencies</h4>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {Object.entries(stats.dependencies).map(([k, v]) => <Badge key={k} color={v ? C.green : C.red}>{k} {v ?? 'missing'}</Badge>)}
+          </div>
+        </Card>
+      </Grid>
+      <p style={{ fontSize: 11, color: C.dim }}>Updated {formatTs(health.timestamp)} · polling every 3 s · database {health.database}</p>
+    </Page>
   )
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  page: { padding: 24, color: '#e2e8f0', maxWidth: 1400 },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 },
-  title: { margin: 0, fontSize: 24, fontWeight: 700, color: '#f1f5f9' },
-  subtitle: { margin: '4px 0 0', color: '#64748b', fontSize: 13 },
-  statusPill: { display: 'flex', alignItems: 'center', gap: 8, background: '#1e293b', border: '1px solid #334155', borderRadius: 8, padding: '6px 14px', fontSize: 13, color: '#94a3b8' },
-  dot: { width: 8, height: 8, borderRadius: '50%', display: 'inline-block' },
-  kpiRow: { display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 24 },
-  kpiCard: { background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: '16px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 120, flex: 1 },
-  kpiIcon: { fontSize: 22 },
-  kpiValue: { fontSize: 28, fontWeight: 700, color: '#f1f5f9' },
-  kpiLabel: { fontSize: 11, color: '#64748b', textAlign: 'center' },
-  chartsRow: { display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap' },
-  chartCard: { background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20, flex: 1, minWidth: 280 },
-  cardTitle: { margin: '0 0 12px', fontSize: 14, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1 },
-  noData: { color: '#475569', fontSize: 13, fontStyle: 'italic' },
-  tooltip: { background: '#0f172a', border: '1px solid #334155', borderRadius: 6, color: '#e2e8f0' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { textAlign: 'left', padding: '6px 10px', fontSize: 11, color: '#64748b', borderBottom: '1px solid #334155', textTransform: 'uppercase' },
-  td: { padding: '8px 10px', fontSize: 13, color: '#cbd5e1', borderBottom: '1px solid #1e293b' },
-  tr: { transition: 'background 0.15s' },
-  badge: { padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 },
-  jobRow: { display: 'flex', gap: 16, alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #334155' },
-  progressBar: { flex: 1, height: 6, background: '#0f172a', borderRadius: 3, overflow: 'hidden' },
-  progressFill: { height: '100%', background: '#3b82f6', borderRadius: 3, transition: 'width 0.4s' },
-  errorBox: { background: '#1c0a0a', border: '1px solid #7f1d1d', borderRadius: 10, padding: 24, display: 'flex', gap: 16, alignItems: 'flex-start', margin: 24, color: '#f87171' },
-  errorRow: { display: 'flex', gap: 12, alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #1e293b' },
-  loading: { color: '#64748b', padding: 48, textAlign: 'center' },
-  footer: { margin: '16px 0 0', color: '#334155', fontSize: 11 },
-  code: { background: '#0f172a', padding: '2px 6px', borderRadius: 4, fontSize: 12 },
 }

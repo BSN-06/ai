@@ -1,52 +1,57 @@
 """
-Generates a sample observation JSON file for testing the recorded-data replay feature.
-Run: python generate_sample_replay.py
+Generates a SIMULATED recorded-observation file for the Recorded-Data Replay mode.
+It is NOT real sensor data; it only exercises the replay → validation → correlation → event pipeline.
+
+Run:    python generate_sample_replay.py
 Output: sample_replay_observations.json
+
+Scenario: three sites several km apart. Every 10 minutes one site gets a short burst of
+satellite / thermal / radar observations (within ~60 s and ~50 m), so each burst should form
+its own event. A few records deliberately lack metadata (missing coordinates / timestamp)
+to show how the pipeline reports them.
 """
 import json
-from datetime import datetime, timedelta
+import random
 import uuid
+from datetime import datetime, timedelta
 
-base_time = datetime(2024, 6, 15, 10, 0, 0)
-observations = []
+random.seed(7)
+base = datetime(2024, 6, 15, 10, 0, 0)
+sites = [(34.0522, -118.2437), (34.0900, -118.3000), (34.0100, -118.1900)]
+obs = []
 
-sensors = [
-    ('satellite', 'vehicle', 0.82, 34.0522, -118.2437),
-    ('thermal',   'person',  0.71, 34.0525, -118.2440),
-    ('radar',     None,      None, 34.0520, -118.2435),
-    ('satellite', 'truck',   0.65, 34.0530, -118.2450),
-    ('thermal',   'car',     0.88, 34.0515, -118.2430),
-]
+for burst in range(9):
+    lat0, lon0 = sites[burst % 3]
+    t0 = base + timedelta(minutes=10 * burst)
+    sensors = ["satellite", "thermal", "radar"] if burst % 4 != 3 else ["satellite"]  # some bursts single-sensor
+    for k, sensor in enumerate(sensors):
+        t = t0 + timedelta(seconds=20 * k + random.randint(0, 5))
+        rec = {
+            "id": f"REC-{burst:02d}-{sensor[:3].upper()}-{uuid.uuid4().hex[:6]}",
+            "sensor_type": sensor,
+            "observation_timestamp": t.isoformat() + "Z",
+            "source_dataset": "simulated_recording",
+            "latitude": round(lat0 + random.uniform(-0.0003, 0.0003), 6),
+            "longitude": round(lon0 + random.uniform(-0.0003, 0.0003), 6),
+            "coordinate_crs": "WGS84",
+            "data_provenance": "recorded",
+        }
+        if sensor in ("satellite", "thermal"):
+            rec.update({"object_class": random.choice(["vehicle", "truck", "person"]),
+                        "confidence": round(random.uniform(0.45, 0.95), 2), "model_name": "recorded_prediction"})
+        else:
+            rec.update({"radar_track_id": f"T-{burst:03d}", "uncertainty": round(random.uniform(4, 30), 1),
+                        "position_x": round(random.uniform(-500, 500), 1), "position_y": round(random.uniform(-500, 500), 1)})
+        obs.append(rec)
 
-for i in range(30):
-    sensor_type, obj_class, conf, lat, lon = sensors[i % len(sensors)]
-    t = base_time + timedelta(minutes=i * 2)
-    obs = {
-        'id': str(uuid.uuid4()),
-        'sensor_type': sensor_type,
-        'observation_timestamp': t.isoformat(),
-        'is_utc': True,
-        'source_dataset': 'sample_replay',
-        'object_class': obj_class,
-        'confidence': conf,
-        'latitude': round(lat + i * 0.0001, 6),
-        'longitude': round(lon + i * 0.0001, 6),
-        'coordinate_crs': 'WGS84',
-        'data_provenance': 'recorded',
-        'processing_status': 'PROCESSED',
-    }
-    if sensor_type == 'radar':
-        obs['radar_track_id'] = f'T-{i:03d}'
-        obs['position_x'] = 1000.0 + i * 5
-        obs['position_y'] = 2000.0 + i * 3
-        obs['velocity_x'] = 5.0
-        obs['velocity_y'] = 2.5
-        obs['uncertainty'] = 8.0 + i * 0.2
-    observations.append(obs)
+# Metadata problems the pipeline must report (not hide)
+obs.append({"id": "REC-NOGEO", "sensor_type": "thermal", "observation_timestamp": (base + timedelta(minutes=33)).isoformat() + "Z",
+            "object_class": "person", "confidence": 0.6, "data_provenance": "recorded"})
+obs.append({"id": "REC-NOTS", "sensor_type": "satellite", "latitude": 34.05, "longitude": -118.24,
+            "coordinate_crs": "WGS84", "data_provenance": "recorded"})
 
-output = {'observations': observations}
-with open('sample_replay_observations.json', 'w') as f:
-    json.dump(output, f, indent=2)
-
-print(f"Generated {len(observations)} observations in sample_replay_observations.json")
-print("Upload this file on the Evaluation → Recorded Data Replay tab to test replay.")
+random.shuffle(obs)  # replay must re-order by recorded timestamp
+with open("sample_replay_observations.json", "w") as f:
+    json.dump({"observations": obs}, f, indent=2)
+print(f"Generated {len(obs)} SIMULATED recorded observations in sample_replay_observations.json")
+print("Load it in Evaluation → Recorded-data replay. One record has no timestamp and will be skipped.")

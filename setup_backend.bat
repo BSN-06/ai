@@ -53,6 +53,10 @@ if not exist "data\replay_data"  mkdir data\replay_data
 if not exist "data\radar_data"   mkdir data\radar_data
 
 echo.
+echo Initialising database and downloading YOLOv8n pretrained weights (needs internet once)...
+python scripts\init_backend.py
+
+echo.
 echo ============================================================
 echo  Backend setup complete!
 echo  Run start_backend.bat to start the API server.

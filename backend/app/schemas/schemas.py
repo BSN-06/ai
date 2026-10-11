@@ -185,8 +185,17 @@ class TrainingJobCreate(BaseModel):
     epochs: int = Field(50, ge=1, le=1000)
     batch_size: int = Field(16, ge=1, le=128)
     image_size: int = Field(640, ge=32, le=2048)
-    learning_rate: Optional[float] = Field(None, gt=0.0)
+    learning_rate: Optional[float] = Field(None, gt=0.0, le=1.0)
     device: str = "cpu"
+
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        import re
+        v = v.strip().lower()
+        if not re.fullmatch(r"cpu|cuda|cuda:\d|\d", v):
+            raise ValueError("device must be 'cpu', 'cuda', 'cuda:N' or a GPU index")
+        return v
 
 
 class TrainingJobResponse(BaseModel):
@@ -265,13 +274,13 @@ class ReplaySessionResponse(BaseModel):
 
 
 class ReplayControl(BaseModel):
-    action: str  # start, pause, resume, reset
+    action: str  # start, pause, resume, reset, speed
     speed: Optional[float] = Field(None, ge=0.1, le=100.0)
 
     @field_validator("action")
     @classmethod
     def validate_action(cls, v: str) -> str:
-        allowed = {"start", "pause", "resume", "reset"}
+        allowed = {"start", "pause", "resume", "reset", "speed", "status"}
         if v.lower() not in allowed:
             raise ValueError(f"action must be one of {allowed}")
         return v.lower()

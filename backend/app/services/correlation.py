@@ -131,8 +131,8 @@ def correlate_observations(obs_a: dict, obs_b: dict, config: Optional[dict] = No
 
     if has_geo_a and has_geo_b:
         # Check CRS compatibility
-        crs_a = obs_a.get("coordinate_crs", "unknown")
-        crs_b = obs_b.get("coordinate_crs", "unknown")
+        crs_a = obs_a.get("coordinate_crs") or "unknown"
+        crs_b = obs_b.get("coordinate_crs") or "unknown"
 
         if crs_a != "unknown" and crs_b != "unknown" and crs_a != crs_b:
             reasons.append(f"Coordinate reference systems differ: {crs_a} vs {crs_b}. "
@@ -230,35 +230,107 @@ def correlate_observation_group(observations: list[dict], config: Optional[dict]
     return results
 
 
-def check_duplicates(observations: list[dict], temporal_threshold_s: float = 5.0) -> list[dict]:
+def _as_dt(ts):
+    if isinstance(ts, str):
+        return datetime.fromisoformat(ts)
+    return ts
+
+
+def check_duplicates(
+    observations: list[dict],
+    temporal_threshold_s: float = 5.0,
+    spatial_threshold_m: float = 25.0,
+) -> list[dict]:
     """
-    Check for potential duplicate observations from the same sensor.
-    Duplicates are observations from the same sensor with very close timestamps
-    and similar class/position.
+    Identify potential duplicate observations (same sensor reporting the same thing twice).
+
+    A pair is a potential duplicate when it comes from the same sensor type AND either
+      - shares the same (source_dataset, source_record_id), or
+      - is within ``temporal_threshold_s`` AND does not contradict on class AND
+        (when both have geographic positions) lies within ``spatial_threshold_m``.
+    Each result explains which rule fired.
     """
     duplicates = []
     for i, obs_a in enumerate(observations):
-        for j, obs_b in enumerate(observations):
-            if i >= j:
-                continue
+        for j in range(i + 1, len(observations)):
+            obs_b = observations[j]
             if obs_a.get("sensor_type") != obs_b.get("sensor_type"):
                 continue
-
-            ts_a = obs_a.get("observation_timestamp")
-            ts_b = obs_b.get("observation_timestamp")
-            if ts_a and ts_b:
-                if isinstance(ts_a, str):
-                    ts_a = datetime.fromisoformat(ts_a)
-                if isinstance(ts_b, str):
-                    ts_b = datetime.fromisoformat(ts_b)
-
+            rule = None
+            rid_a, rid_b = obs_a.get("source_record_id"), obs_b.get("source_record_id")
+            if rid_a and rid_a == rid_b and obs_a.get("source_dataset") == obs_b.get("source_dataset"):
+                rule = "same source record id"
+            delta = None
+            ts_a, ts_b = _as_dt(obs_a.get("observation_timestamp")), _as_dt(obs_b.get("observation_timestamp"))
+            if rule is None and ts_a and ts_b:
                 delta = abs((ts_a - ts_b).total_seconds())
-                if delta <= temporal_threshold_s:
-                    duplicates.append({
-                        "observation_ids": [obs_a.get("id"), obs_b.get("id")],
-                        "sensor_type": obs_a.get("sensor_type"),
-                        "temporal_delta_s": delta,
-                        "is_potential_duplicate": True,
-                    })
-
+                if delta > temporal_threshold_s:
+                    continue
+                ca, cb = obs_a.get("object_class"), obs_b.get("object_class")
+                if ca and cb and ca.lower() != cb.lower():
+                    continue
+                if None not in (obs_a.get("latitude"), obs_a.get("longitude"),
+                                obs_b.get("latitude"), obs_b.get("longitude")):
+                    d = haversine_distance_m(obs_a["latitude"], obs_a["longitude"],
+                                             obs_b["latitude"], obs_b["longitude"])
+                    if d > spatial_threshold_m:
+                        continue
+                rule = "same sensor, close in time, compatible class/position"
+            if rule:
+                duplicates.append({
+                    "observation_ids": [obs_a.get("id"), obs_b.get("id")],
+                    "sensor_type": obs_a.get("sensor_type"),
+                    "temporal_delta_s": delta,
+                    "is_potential_duplicate": True,
+                    "rule": rule,
+                })
     return duplicates
+
+
+def group_correlated(observations: list[dict], decisions: list[dict], duplicates: list[dict]) -> list[dict]:
+    """
+    Build event groups from pairwise CORRELATED decisions (connected components).
+
+    - Duplicates are collapsed: the second record of a duplicate pair is attached to the group
+      as ``duplicate_ids`` and is NOT counted as independent evidence.
+    - Observations that correlate with nothing form a single-observation group.
+
+    Returns [{"observation_ids": [...independent...], "duplicate_ids": [...],
+              "decisions": [...decisions inside the group...]}]
+    """
+    ids = [o.get("id") for o in observations]
+    parent = {i: i for i in ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    dup_of = {}
+    for d in duplicates:
+        a, b = d["observation_ids"]
+        if a in parent and b in parent and b not in dup_of and a not in dup_of:
+            dup_of[b] = a
+
+    for dec in decisions:
+        if dec.get("decision_status") != "CORRELATED":
+            continue
+        a, b = dec["observation_ids"]
+        a, b = dup_of.get(a, a), dup_of.get(b, b)
+        if a in parent and b in parent and a != b:
+            parent[find(a)] = find(b)
+
+    groups: dict[str, dict] = {}
+    for oid in ids:
+        root = find(dup_of.get(oid, oid))
+        g = groups.setdefault(root, {"observation_ids": [], "duplicate_ids": [], "decisions": []})
+        (g["duplicate_ids"] if oid in dup_of else g["observation_ids"]).append(oid)
+
+    for dec in decisions:
+        a = dec["observation_ids"][0]
+        if a in parent:
+            root = find(dup_of.get(a, a))
+            if dec["observation_ids"][1] in groups[root]["observation_ids"] + groups[root]["duplicate_ids"]:
+                groups[root]["decisions"].append(dec)
+    return list(groups.values())

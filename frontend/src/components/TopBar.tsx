@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
 const PAGE_TITLES: Record<string, string> = {
@@ -15,16 +16,18 @@ const PAGE_TITLES: Record<string, string> = {
 export default function TopBar() {
   const { pathname } = useLocation()
   const title = PAGE_TITLES[pathname] ?? 'AI Surveillance System'
-  const now = new Date().toLocaleString('en-GB', {
+  const [tick, setTick] = useState(Date.now())
+  useEffect(() => { const id = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(id) }, [])
+  const now = new Date(tick).toLocaleString('en-GB', {
     weekday: 'short', year: 'numeric', month: 'short',
-    day: '2-digit', hour: '2-digit', minute: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
 
   return (
     <header style={s.bar}>
       <h2 style={s.title}>{title}</h2>
       <div style={s.right}>
-        <span style={s.time}>{now}</span>
+        <span style={s.time} title="Local wall-clock time (replay uses recorded timestamps)">{now}</span>
         <span style={s.tag}>OFFLINE RESEARCH PROTOTYPE</span>
       </div>
     </header>
@@ -59,7 +62,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   time: {
     fontSize: 12,
-    color: '#334155',
+    color: '#64748b',
     fontFamily: 'monospace',
   },
   tag: {

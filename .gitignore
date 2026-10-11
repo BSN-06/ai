@@ -1,0 +1,30 @@
+# Dependencies / environments
+frontend/node_modules/
+backend/venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build output
+frontend/dist/
+
+# Runtime data (database, uploads, datasets, checkpoints, training runs, reports)
+backend/data/
+backend/test_surveillance.db
+*.db
+*.pt
+!backend/data/.gitkeep
+
+# Generated sample files
+sample_radar_data.csv
+sample_replay_observations.json
+backend/sample_*.csv
+backend/sample_*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.env
